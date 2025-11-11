@@ -35,3 +35,12 @@ export interface AnalysisResult {
   accounts: ExtractedAccount[];
   spell_check: SpellCheck[];
 }
+
+export interface HistoryItem {
+  id: string;
+  timestamp: string;
+  headerData: HeaderData;
+  fileName: string;
+  summary: AnalysisSummary;
+  fullResult: AnalysisResult;
+}
