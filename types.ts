@@ -12,6 +12,7 @@ export interface ExtractedAccount {
   total_value: number;
   type: 'Debit' | 'Credit' | 'Unknown';
   possible_inversion: boolean;
+  ifrs18_category?: 'Operacional' | 'Investimento' | 'Financiamento' | null;
 }
 
 export interface SpellCheck {

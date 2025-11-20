@@ -9,6 +9,7 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
 const HISTORY_STORAGE_KEY = 'auditAI_history';
+const THEME_STORAGE_KEY = 'auditAI_theme';
 const MAX_HISTORY_ITEMS = 15;
 
 const LoadingSpinner = () => {
@@ -33,13 +34,13 @@ const LoadingSpinner = () => {
 
   return (
     <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex flex-col items-center justify-center z-50 animate-fadeIn">
-       <div className="bg-white p-8 rounded-2xl shadow-2xl flex flex-col items-center max-w-sm w-full mx-4 border border-slate-100">
+       <div className="bg-white dark:bg-slate-800 p-8 rounded-2xl shadow-2xl flex flex-col items-center max-w-sm w-full mx-4 border border-slate-100 dark:border-slate-700">
           <div className="relative flex items-center justify-center mb-6">
              <div className="animate-ping absolute inline-flex h-12 w-12 rounded-full bg-blue-500/20 opacity-75"></div>
              <div className="relative animate-spin rounded-full h-16 w-16 border-t-4 border-blue-500"></div>
           </div>
-          <h3 className="text-xl font-bold text-slate-800 mb-2">Analisando com IA</h3>
-          <p className="text-blue-500 font-medium text-center animate-pulse min-h-[24px]">
+          <h3 className="text-xl font-bold text-slate-800 dark:text-white mb-2">Analisando com IA</h3>
+          <p className="text-blue-500 dark:text-blue-400 font-medium text-center animate-pulse min-h-[24px]">
               {message}
           </p>
           <p className="text-slate-400 text-xs text-center mt-4">
@@ -62,25 +63,53 @@ const App: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<{file: File, base64: string} | null>(null);
   const [analysisTimestamp, setAnalysisTimestamp] = useState<string | null>(null);
   
-  // History State
+  // History & Theme State
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
+  const [darkMode, setDarkMode] = useState(false);
 
-  // Load history on mount
+  // Load history and theme on mount
   useEffect(() => {
     try {
       const savedHistory = localStorage.getItem(HISTORY_STORAGE_KEY);
       if (savedHistory) {
         setHistory(JSON.parse(savedHistory));
       }
+
+      const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
+      if (savedTheme === 'dark' || (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
+        setDarkMode(true);
+        document.documentElement.classList.add('dark');
+      } else {
+        setDarkMode(false);
+        document.documentElement.classList.remove('dark');
+      }
     } catch (e) {
-      console.error("Failed to load history from localStorage", e);
+      console.error("Failed to load local storage data", e);
     }
   }, []);
 
+  const toggleTheme = () => {
+    const newMode = !darkMode;
+    setDarkMode(newMode);
+    if (newMode) {
+      document.documentElement.classList.add('dark');
+      localStorage.setItem(THEME_STORAGE_KEY, 'dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+      localStorage.setItem(THEME_STORAGE_KEY, 'light');
+    }
+  };
+
   const saveToHistory = (result: AnalysisResult, header: HeaderData, fileName: string) => {
+    // Check if already exists to update instead of duplicate (Cache mechanism)
+    const existingIndex = history.findIndex(h => 
+        h.headerData.companyName === header.companyName && 
+        h.fileName === fileName
+    );
+
     const newItem: HistoryItem = {
-      id: Date.now().toString() + Math.random().toString(36).substring(2, 9),
+      id: existingIndex >= 0 ? history[existingIndex].id : Date.now().toString() + Math.random().toString(36).substring(2, 9),
       timestamp: new Date().toISOString(),
       headerData: { ...header },
       fileName: fileName,
@@ -88,18 +117,24 @@ const App: React.FC = () => {
       fullResult: result
     };
 
-    const updatedHistory = [newItem, ...history].slice(0, MAX_HISTORY_ITEMS);
+    let updatedHistory;
+    if (existingIndex >= 0) {
+        // Move to top if updated
+        updatedHistory = [newItem, ...history.filter((_, i) => i !== existingIndex)];
+    } else {
+        updatedHistory = [newItem, ...history].slice(0, MAX_HISTORY_ITEMS);
+    }
+
     setHistory(updatedHistory);
     try {
       localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updatedHistory));
     } catch (e) {
       console.error("Failed to save history to localStorage (probably quota exceeded)", e);
-      // Optionally warn user that history couldn't be saved
     }
   };
 
   const clearHistory = () => {
-    if (window.confirm("Tem certeza que deseja apagar todo o histórico de análises?")) {
+    if (window.confirm("Tem certeza que deseja apagar todo o cache e histórico de análises?")) {
       setHistory([]);
       localStorage.removeItem(HISTORY_STORAGE_KEY);
     }
@@ -110,7 +145,6 @@ const App: React.FC = () => {
     setAnalysisResult(item.fullResult);
     setAnalysisTimestamp(item.timestamp);
     // Create a fake file object just to display the name correctly in the UI if needed
-    // We don't have the base64 anymore, so re-analysis won't work without re-uploading
     setSelectedFile({ 
         file: { name: item.fileName, type: 'application/pdf' } as File, // Mock file for display
         base64: '' 
@@ -135,6 +169,22 @@ const App: React.FC = () => {
     if (!selectedFile || !selectedFile.base64) {
       setError("Por favor, selecione um arquivo para analisar.");
       return;
+    }
+
+    // CACHE CHECK
+    const cachedItem = history.find(item => 
+        item.fileName === selectedFile.file.name && 
+        item.headerData.companyName === headerData.companyName
+    );
+
+    if (cachedItem) {
+        const useCache = window.confirm(
+            `Encontramos uma análise salva em CACHE para "${selectedFile.file.name}" desta empresa.\n\nDeseja carregar o resultado instantaneamente?\n(Clique em Cancelar para re-processar com IA)`
+        );
+        if (useCache) {
+            loadFromHistory(cachedItem);
+            return;
+        }
     }
 
     setIsLoading(true);
@@ -310,7 +360,7 @@ const App: React.FC = () => {
   }
 
   return (
-    <div className="min-h-screen bg-slate-100 pb-12 overflow-x-hidden">
+    <div className="min-h-screen bg-slate-100 dark:bg-slate-900 pb-12 overflow-x-hidden transition-colors duration-300">
       {/* History Sidebar */}
       <AnalysisHistory 
         isOpen={isHistoryOpen} 
@@ -321,7 +371,7 @@ const App: React.FC = () => {
       />
 
       {/* Top Navigation Bar */}
-      <header className="bg-blue-600 text-white py-4 shadow-md sticky top-0 z-10">
+      <header className="bg-blue-600 dark:bg-blue-900 text-white py-4 shadow-md sticky top-0 z-10 transition-colors">
         <div className="max-w-5xl mx-auto px-4 flex items-center justify-between">
           <div className="flex items-center space-x-3">
             <img 
@@ -332,18 +382,35 @@ const App: React.FC = () => {
             <div className="flex flex-col">
                 <div className="flex flex-wrap items-baseline gap-x-2">
                     <h1 className="text-xl font-bold tracking-tight leading-none">AuditAI</h1>
-                    <span className="text-[11px] md:text-xs text-blue-200 font-medium leading-tight">Desenvolvido By SP Assessoria Contábil</span>
+                    <span className="text-[11px] md:text-xs text-blue-200 font-medium leading-tight">By SP Assessoria Contábil</span>
                 </div>
                 <span className="text-sm font-normal text-blue-100 leading-tight mt-0.5">Análise Contábil Inteligente</span>
             </div>
           </div>
           <div className="flex items-center space-x-2 md:space-x-3">
+             {/* Theme Toggle */}
+             <button
+                onClick={toggleTheme}
+                className="text-white/80 hover:text-white p-2 rounded-full hover:bg-white/10 transition-colors"
+                title={darkMode ? "Mudar para Modo Claro" : "Mudar para Modo Escuro"}
+             >
+               {darkMode ? (
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 3v2.25m6.364.386l-1.591 1.591M21 12h-2.25m-.386 6.364l-1.591-1.591M12 18.75V21m-4.773-4.227l-1.591 1.591M5.25 12H3m4.227-4.773L5.636 5.636M15.75 12a3.75 3.75 0 11-7.5 0 3.75 3.75 0 017.5 0z" />
+                  </svg>
+               ) : (
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M21.752 15.002A9.718 9.718 0 0118 15.75c-5.385 0-9.75-4.365-9.75-9.75 0-1.33.266-2.597.748-3.752A9.753 9.753 0 003 11.25C3 16.635 7.365 21 12.75 21a9.753 9.753 0 009.002-5.998z" />
+                  </svg>
+               )}
+             </button>
+
              {analysisResult ? (
                 <>
                      <div className="hidden md:flex space-x-2">
                          <button
                             onClick={() => generatePDF(false)}
-                            className="text-sm bg-blue-800 hover:bg-blue-700 text-white py-2 px-3 rounded-md transition-colors flex items-center font-medium"
+                            className="text-sm bg-blue-800 hover:bg-blue-700 dark:bg-blue-700 dark:hover:bg-blue-600 text-white py-2 px-3 rounded-md transition-colors flex items-center font-medium"
                             title="Exportar original"
                         >
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4 mr-1">
@@ -379,7 +446,7 @@ const App: React.FC = () => {
              <button
                 onClick={() => setIsHistoryOpen(true)}
                 className="text-sm bg-white/10 hover:bg-white/20 text-white p-2 md:py-2 md:px-3 rounded-md transition-colors flex items-center ml-2"
-                title="Ver Histórico"
+                title="Ver Histórico / Cache"
              >
                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 md:mr-1">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -397,14 +464,14 @@ const App: React.FC = () => {
           <div className={`transition-all duration-500 ${isLoading ? 'opacity-50 pointer-events-none blur-sm' : 'opacity-100'}`}>
              <HeaderInputs data={headerData} onChange={setHeaderData} disabled={isLoading} />
              
-             <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200">
-                <h2 className="text-lg font-semibold text-slate-800 mb-1 flex items-center">
-                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 mr-2 text-blue-600">
+             <div className="bg-white dark:bg-slate-800 p-6 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 transition-colors">
+                <h2 className="text-lg font-semibold text-slate-800 dark:text-white mb-1 flex items-center">
+                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 mr-2 text-blue-600 dark:text-blue-400">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
                   </svg>
                   Upload do Documento Contábil
                 </h2>
-                <p className="text-center text-slate-500 mb-4 font-medium">
+                <p className="text-center text-slate-500 dark:text-slate-400 mb-4 font-medium">
                   Balanço / Balancete / DRE
                 </p>
                 
@@ -415,7 +482,7 @@ const App: React.FC = () => {
                 />
 
                 {error && (
-                  <div className="mt-4 p-3 bg-red-50 text-red-700 border border-red-200 rounded-md text-sm flex items-center animate-shake">
+                  <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 border border-red-200 dark:border-red-800/50 rounded-md text-sm flex items-center animate-shake">
                     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-5 h-5 mr-2 flex-shrink-0">
                       <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
                     </svg>
@@ -429,7 +496,7 @@ const App: React.FC = () => {
                     disabled={isLoading || !selectedFile || !selectedFile.base64}
                     className={`w-full py-3 px-4 rounded-lg font-bold text-white text-lg flex items-center justify-center transition-all
                       ${isLoading || !selectedFile || !selectedFile.base64
-                        ? 'bg-slate-400 cursor-not-allowed' 
+                        ? 'bg-slate-400 dark:bg-slate-600 cursor-not-allowed' 
                         : 'bg-blue-600 hover:bg-blue-700 shadow-lg hover:shadow-xl active:scale-[0.99]'
                       }`}
                     title={!selectedFile?.base64 && selectedFile?.file.name ? "Re-upload necessário para nova análise" : ""}
@@ -452,17 +519,17 @@ const App: React.FC = () => {
 
         {analysisResult && !isLoading && (
           <>
-            <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-200 mb-6 animate-fadeIn">
+            <div className="bg-white dark:bg-slate-800 p-6 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 mb-6 animate-fadeIn transition-colors">
               <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
                 <div>
-                  <h2 className="text-2xl font-bold text-slate-800 tracking-tight">
+                  <h2 className="text-2xl font-bold text-slate-800 dark:text-white tracking-tight">
                     {headerData.companyName}
                   </h2>
-                  <p className="text-sm text-slate-500 font-medium mt-1">
+                  <p className="text-sm text-slate-500 dark:text-slate-400 font-medium mt-1">
                     {selectedFile?.file.name}
                   </p>
                 </div>
-                <div className="flex items-center text-sm font-medium text-slate-600 bg-slate-100 px-4 py-2 rounded-lg">
+                <div className="flex items-center text-sm font-medium text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-700 px-4 py-2 rounded-lg">
                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 mr-2 text-slate-400">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75m-18 0h18" />
                   </svg>
