@@ -16,7 +16,7 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
     return new Date(isoString).toLocaleString('pt-BR', {
       day: '2-digit',
       month: '2-digit',
-      year: '2-digit',
+      year: 'numeric',
       hour: '2-digit',
       minute: '2-digit'
     });
@@ -52,7 +52,7 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 mr-2 text-blue-600 dark:text-blue-400">
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            Histórico / Cache
+            Histórico de Consultas
           </h2>
           <button onClick={onClose} className="text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-white p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-full transition-colors">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
@@ -71,7 +71,7 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
             </div>
             <input
               type="text"
-              placeholder="Buscar por colaborador, empresa..."
+              placeholder="Filtrar por colaborador, empresa..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
               className="w-full pl-10 pr-4 py-2 border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white rounded-lg text-sm focus:ring-2 focus:ring-accent focus:border-accent"
@@ -103,37 +103,56 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
                   onClick={() => { onSelect(item); onClose(); }}
                   className="bg-white dark:bg-slate-700 p-4 rounded-lg border border-slate-200 dark:border-slate-600 shadow-sm hover:border-blue-400 dark:hover:border-blue-400 hover:shadow-md cursor-pointer transition-all group"
                 >
-                  <div className="flex justify-between items-start mb-2">
-                    <div>
-                      <p className="font-semibold text-slate-800 dark:text-white group-hover:text-blue-700 dark:group-hover:text-blue-300 transition-colors">
-                        {item.headerData.companyName || 'Empresa não informada'}
-                      </p>
-                      <p className="text-xs text-slate-500 dark:text-slate-400 truncate max-w-[180px]" title={item.fileName}>{item.fileName}</p>
+                  {/* Row 1: Company & Date */}
+                  <div className="flex justify-between items-start mb-3">
+                    <div className="flex-1 mr-2">
+                        <p className="text-xs text-slate-400 dark:text-slate-400 uppercase font-bold tracking-wider mb-0.5">Empresa</p>
+                        <p className="font-bold text-slate-800 dark:text-white text-base leading-tight group-hover:text-blue-600 dark:group-hover:text-blue-300 transition-colors">
+                            {item.headerData.companyName || 'Não informada'}
+                        </p>
                     </div>
-                    <span className="text-xs font-medium text-slate-400 bg-slate-100 dark:bg-slate-600 dark:text-slate-300 px-2 py-1 rounded-full whitespace-nowrap">
-                      {formatDate(item.timestamp)}
-                    </span>
+                    <div className="text-right">
+                        <p className="text-xs text-slate-400 dark:text-slate-400 uppercase font-bold tracking-wider mb-0.5">Data</p>
+                        <span className="text-xs font-medium text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-600 px-2 py-1 rounded whitespace-nowrap block">
+                            {formatDate(item.timestamp)}
+                        </span>
+                    </div>
                   </div>
-                  <p className="text-xs text-slate-600 dark:text-slate-300 mb-3"><span className="font-semibold">Colaborador:</span> {item.headerData.collaboratorName || 'N/A'}</p>
-                  <div className="flex items-center justify-between mt-3">
-                    <span className="text-sm font-medium text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-600 px-2 py-0.5 rounded">
-                      {item.summary.document_type}
-                    </span>
-                    {item.summary.is_balanced ? (
-                      <span className="flex items-center text-xs font-bold text-green-700 dark:text-green-300 bg-green-100 dark:bg-green-900/50 px-2 py-1 rounded-full">
-                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 mr-1">
-                          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clipRule="evenodd" />
+
+                  {/* Row 2: Collaborator (Highlighted) */}
+                  <div className="flex items-center bg-blue-50 dark:bg-blue-900/20 p-2 rounded border border-blue-100 dark:border-blue-800/30 mb-3">
+                      <div className="bg-blue-100 dark:bg-blue-800 p-1.5 rounded-full mr-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-4 h-4 text-blue-600 dark:text-blue-300">
+                            <path d="M10 8a3 3 0 100-6 3 3 0 000 6zM3.465 14.493a1.23 1.23 0 00.41 1.412A9.957 9.957 0 0010 18c2.31 0 4.438-.784 6.131-2.1.43-.333.604-.903.408-1.41a7.002 7.002 0 00-13.074.003z" />
                         </svg>
-                        Balanceado
-                      </span>
-                    ) : (
-                      <span className="flex items-center text-xs font-bold text-red-700 dark:text-red-300 bg-red-100 dark:bg-red-900/50 px-2 py-1 rounded-full">
-                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" className="w-3 h-3 mr-1">
-                            <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-8-5a.75.75 0 01.75.75v4.5a.75.75 0 01-1.5 0v-4.5A.75.75 0 0110 5zm0 10a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
-                          </svg>
-                        Desbalanceado
-                      </span>
-                    )}
+                      </div>
+                      <div className="overflow-hidden">
+                          <p className="text-[10px] text-blue-500 dark:text-blue-400 font-bold uppercase">Colaborador Responsável</p>
+                          <p className="text-sm font-semibold text-blue-900 dark:text-blue-100 truncate">
+                              {item.headerData.collaboratorName || 'N/A'}
+                          </p>
+                      </div>
+                  </div>
+
+                  {/* Row 3: File & Details */}
+                  <div className="flex items-center justify-between border-t border-slate-100 dark:border-slate-600 pt-3">
+                     <div className="flex items-center text-slate-500 dark:text-slate-400 max-w-[60%]">
+                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4 mr-1 flex-shrink-0">
+                            <path strokeLinecap="round" strokeLinejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m2.25 0H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                        </svg>
+                        <span className="text-xs truncate" title={item.fileName}>{item.fileName}</span>
+                     </div>
+
+                     <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300">
+                            {item.summary.document_type.split(' ')[0]}
+                        </span>
+                        {item.summary.is_balanced ? (
+                            <span className="h-2.5 w-2.5 rounded-full bg-green-500" title="Balanceado"></span>
+                        ) : (
+                            <span className="h-2.5 w-2.5 rounded-full bg-red-500" title="Desbalanceado"></span>
+                        )}
+                     </div>
                   </div>
                 </li>
               ))}

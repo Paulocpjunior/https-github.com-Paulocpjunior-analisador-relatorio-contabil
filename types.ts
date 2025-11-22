@@ -7,12 +7,16 @@ export interface HeaderData {
 export interface ExtractedAccount {
   account_code: string | null;
   account_name: string;
+  initial_balance: number; // SDO.ANTERIOR
   debit_value: number;
   credit_value: number;
-  total_value: number;
+  final_balance: number; // SDO.ATUAL
+  total_value: number; // Usually matches final_balance or max(debit, credit) for fallback
   type: 'Debit' | 'Credit' | 'Unknown';
   possible_inversion: boolean;
   ifrs18_category?: 'Operacional' | 'Investimento' | 'Financiamento' | null;
+  level: number; // Hierarchy level (1, 2, 3...)
+  is_synthetic: boolean; // True if it is a Group/Sub-group, False if Analytical
 }
 
 export interface SpellCheck {
@@ -23,6 +27,7 @@ export interface SpellCheck {
 
 export interface AnalysisSummary {
   document_type: 'Balanço Patrimonial' | 'Balancete' | 'DRE' | 'Outro';
+  period: string; // New field for extracted date range
   total_debits: number;
   total_credits: number;
   is_balanced: boolean;
@@ -43,5 +48,5 @@ export interface HistoryItem {
   headerData: HeaderData;
   fileName: string;
   summary: AnalysisSummary;
-  fullResult: AnalysisResult;
+  fullResult?: AnalysisResult; // Optional to allow optimizing localStorage usage
 }

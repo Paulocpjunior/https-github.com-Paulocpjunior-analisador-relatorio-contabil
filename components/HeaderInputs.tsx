@@ -9,6 +9,7 @@ interface Props {
 
 const HeaderInputs: React.FC<Props> = ({ data, onChange, disabled }) => {
   const [cnpjError, setCnpjError] = useState(false);
+  const [isLoadingCnpj, setIsLoadingCnpj] = useState(false);
 
   const validateCNPJ = (cnpj: string) => {
     const numbers = cnpj.replace(/\D/g, '');
@@ -47,25 +48,69 @@ const HeaderInputs: React.FC<Props> = ({ data, onChange, disabled }) => {
     return true;
   };
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const { name, value } = e.target;
-    onChange({ ...data, [name]: value });
+  const fetchCompanyData = async (cnpj: string) => {
+    const cleanCnpj = cnpj.replace(/\D/g, '');
+    
+    // Basic validation before fetching
+    if (cleanCnpj.length !== 14 || !validateCNPJ(cleanCnpj)) {
+        return;
+    }
+
+    setIsLoadingCnpj(true);
+    try {
+        // Using BrasilAPI (Free, no key required)
+        const response = await fetch(`https://brasilapi.com.br/api/cnpj/v1/${cleanCnpj}`);
+        
+        if (!response.ok) {
+            throw new Error('CNPJ não encontrado ou erro na API');
+        }
+
+        const companyData = await response.json();
+        
+        // Prioritize Razão Social, fallback to Nome Fantasia
+        const companyName = companyData.razao_social || companyData.nome_fantasia || '';
+
+        if (companyName) {
+            onChange({
+                ...data,
+                cnpj: cnpj, // Keep current masked value
+                companyName: companyName
+            });
+            setCnpjError(false);
+        }
+    } catch (error) {
+        console.warn("Erro ao buscar CNPJ:", error);
+        // We don't block the user, just don't autofill
+        setCnpjError(true); 
+    } finally {
+        setIsLoadingCnpj(false);
+    }
   };
 
   const handleCnpjChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     let value = e.target.value.replace(/\D/g, '');
     if (value.length > 14) value = value.slice(0, 14);
     
+    const rawValue = value; // Keep raw for length check
+
+    // Masking
     value = value.replace(/^(\d{2})(\d)/, '$1.$2');
     value = value.replace(/^(\d{2})\.(\d{3})(\d)/, '$1.$2.$3');
     value = value.replace(/\.(\d{3})(\d)/, '.$1/$2');
     value = value.replace(/(\d{4})(\d)/, '$1-$2');
     
+    // Update state immediately with mask
     onChange({ ...data, cnpj: value });
     
     // Validate only if completely typed or empty
-    if (value.replace(/\D/g, '').length === 14 || value === '') {
-        setCnpjError(!validateCNPJ(value));
+    if (rawValue.length === 14) {
+        const isValid = validateCNPJ(rawValue);
+        setCnpjError(!isValid);
+        if (isValid) {
+            fetchCompanyData(rawValue);
+        }
+    } else if (value === '') {
+        setCnpjError(false);
     } else {
         // Don't show error while typing until it's full length
         setCnpjError(false);
@@ -75,6 +120,11 @@ const HeaderInputs: React.FC<Props> = ({ data, onChange, disabled }) => {
   const handleCnpjBlur = () => {
       // On blur, mark as error if not empty and invalid (including incomplete)
       setCnpjError(!validateCNPJ(data.cnpj));
+  };
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const { name, value } = e.target;
+    onChange({ ...data, [name]: value });
   };
 
   return (
@@ -88,26 +138,36 @@ const HeaderInputs: React.FC<Props> = ({ data, onChange, disabled }) => {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div>
           <label htmlFor="cnpj" className={`block text-sm font-bold mb-1 ${cnpjError ? 'text-red-600 dark:text-red-400' : 'text-blue-600 dark:text-blue-400'}`}>
-            CNPJ <span className={`${cnpjError ? 'text-red-400' : 'text-blue-400 dark:text-blue-300'} font-normal text-xs`}>(Opcional)</span>
+            CNPJ <span className={`${cnpjError ? 'text-red-400' : 'text-blue-400 dark:text-blue-300'} font-normal text-xs`}>(Busca Automática)</span>
           </label>
-          <input
-            type="text"
-            id="cnpj"
-            name="cnpj"
-            value={data.cnpj}
-            onChange={handleCnpjChange}
-            onBlur={handleCnpjBlur}
-            disabled={disabled}
-            placeholder="00.000.000/0000-00"
-            maxLength={18}
-            className={`w-full px-4 py-2 border rounded-lg focus:ring-2 transition-colors disabled:bg-slate-100 disabled:cursor-not-allowed font-medium
-                ${cnpjError 
-                    ? 'border-red-500 focus:ring-red-500 focus:border-red-500 bg-red-50 text-red-900 placeholder-red-300 dark:bg-red-900/20 dark:text-red-200' 
-                    : 'border-blue-700 focus:ring-blue-500 focus:border-blue-500 bg-blue-600 text-white placeholder-blue-200 dark:bg-blue-900/50 dark:border-blue-500'
-                }`}
-          />
+          <div className="relative">
+            <input
+                type="text"
+                id="cnpj"
+                name="cnpj"
+                value={data.cnpj}
+                onChange={handleCnpjChange}
+                onBlur={handleCnpjBlur}
+                disabled={disabled || isLoadingCnpj}
+                placeholder="00.000.000/0000-00"
+                maxLength={18}
+                className={`w-full px-4 py-2 border rounded-lg focus:ring-2 transition-colors disabled:bg-slate-100 disabled:cursor-not-allowed font-medium
+                    ${cnpjError 
+                        ? 'border-red-500 focus:ring-red-500 focus:border-red-500 bg-red-50 text-red-900 placeholder-red-300 dark:bg-red-900/20 dark:text-red-200' 
+                        : 'border-blue-700 focus:ring-blue-500 focus:border-blue-500 bg-blue-600 text-white placeholder-blue-200 dark:bg-blue-900/50 dark:border-blue-500'
+                    }`}
+            />
+            {isLoadingCnpj && (
+                <div className="absolute right-3 top-1/2 transform -translate-y-1/2">
+                    <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                    </svg>
+                </div>
+            )}
+          </div>
           {cnpjError && (
-              <p className="text-red-500 text-xs mt-1">CNPJ inválido</p>
+              <p className="text-red-500 text-xs mt-1">CNPJ inválido ou não encontrado.</p>
           )}
         </div>
         <div>
@@ -120,7 +180,7 @@ const HeaderInputs: React.FC<Props> = ({ data, onChange, disabled }) => {
             name="companyName"
             value={data.companyName}
             onChange={handleChange}
-            disabled={disabled}
+            disabled={disabled || isLoadingCnpj}
             placeholder="Ex: Cliente Exemplo LTDA"
             className="w-full px-4 py-2 border border-blue-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors disabled:bg-slate-100 disabled:cursor-not-allowed bg-blue-600 text-white placeholder-blue-200 font-medium dark:bg-blue-900/50 dark:border-blue-500"
           />
