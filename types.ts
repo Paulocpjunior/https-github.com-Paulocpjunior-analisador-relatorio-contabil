@@ -33,6 +33,8 @@ export interface AnalysisSummary {
   is_balanced: boolean;
   discrepancy_amount: number;
   observations: string[];
+  specific_result_value?: number; // The actual "Lucro/Prejuízo" value extracted from the doc
+  specific_result_label?: string; // The name of the account found (e.g. "Lucro Líquido")
 }
 
 // The complete structured response we expect from Gemini

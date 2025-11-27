@@ -2,6 +2,7 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { AnalysisResult, ExtractedAccount, HeaderData } from '../types';
 import { generateFinancialInsight, generateCMVAnalysis } from '../services/geminiService';
 import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 interface Props {
   result: AnalysisResult;
@@ -10,6 +11,23 @@ interface Props {
 
 type SortKey = keyof ExtractedAccount;
 
+interface TableTheme {
+    name: string;
+    headerBg: string;
+    headerText: string;
+    rowOddBg: string;
+    rowEvenBg: string;
+    border: string;
+}
+
+const DEFAULT_THEMES: TableTheme[] = [
+    { name: 'Padrão (Slate)', headerBg: '#f1f5f9', headerText: '#64748b', rowOddBg: '#ffffff', rowEvenBg: '#f8fafc', border: '#e2e8f0' },
+    { name: 'Ocean (Azul)', headerBg: '#e0f2fe', headerText: '#0369a1', rowOddBg: '#ffffff', rowEvenBg: '#f0f9ff', border: '#bae6fd' },
+    { name: 'Forest (Verde)', headerBg: '#dcfce7', headerText: '#15803d', rowOddBg: '#ffffff', rowEvenBg: '#f0fdf4', border: '#bbf7d0' },
+    { name: 'Classic (Cinza)', headerBg: '#e5e7eb', headerText: '#374151', rowOddBg: '#ffffff', rowEvenBg: '#f3f4f6', border: '#d1d5db' },
+];
+
+const TABLE_THEME_KEY = 'auditAI_table_theme';
 const DEFAULT_EBITDA_MULTIPLE_KEY = 'auditAI_default_ebitda_multiple';
 
 const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
@@ -17,16 +35,34 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isTableLoading, setIsTableLoading] = useState(true);
   
+  // Theme State
+  const [showThemeSettings, setShowThemeSettings] = useState(false);
+  const [customTheme, setCustomTheme] = useState<TableTheme>(DEFAULT_THEMES[0]);
+
+  useEffect(() => {
+    const saved = localStorage.getItem(TABLE_THEME_KEY);
+    if (saved) {
+        try {
+            setCustomTheme(JSON.parse(saved));
+        } catch (e) {
+            console.error("Failed to load theme", e);
+        }
+    }
+  }, []);
+
+  const applyTheme = (theme: TableTheme) => {
+      setCustomTheme(theme);
+      localStorage.setItem(TABLE_THEME_KEY, JSON.stringify(theme));
+  };
+  
   const [expandedIFRSCategories, setExpandedIFRSCategories] = useState<{
       Operacional: boolean;
       Investimento: boolean;
       Financiamento: boolean;
   }>({ Operacional: true, Investimento: false, Financiamento: false });
 
-  // State to track expanded groups (Synthetic Accounts) by Code
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
   
-  // Initialize all groups as expanded by default when result changes
   useEffect(() => {
       if (result.accounts) {
           const allSyntheticCodes = result.accounts.filter(a => a.is_synthetic && a.account_code).map(a => a.account_code!);
@@ -34,10 +70,10 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
       }
   }, [result]);
 
-  const [isValuationExpanded, setIsValuationExpanded] = useState(true);
-  const [isSpellCheckExpanded, setIsSpellCheckExpanded] = useState(true); // Default to true to show suggestions immediately
+  const [isValuationExpanded, setIsValuationExpanded] = useState(false);
+  const [isInversionExpanded, setIsInversionExpanded] = useState(true);
   const [currentPage, setCurrentPage] = useState(1);
-  const [itemsPerPage] = useState(100); // Increased since we have hierarchy now
+  const [itemsPerPage] = useState(100);
 
   const [showFilters, setShowFilters] = useState(false);
   const [filterType, setFilterType] = useState<'All' | 'Debit' | 'Credit'>('All');
@@ -45,17 +81,53 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
   const [filterMaxVal, setFilterMaxVal] = useState<string>('');
   const [filterInversion, setFilterInversion] = useState<'all' | 'yes' | 'no'>('all');
   const [filterHasCorrection, setFilterHasCorrection] = useState(false);
+  
   const [showCorrectedNames, setShowCorrectedNames] = useState(false);
+  const [showSuggestionCol, setShowSuggestionCol] = useState(false);
 
+  // Valuation & Insight State
   const [insightPrompt, setInsightPrompt] = useState('Calcular EBITDA detalhado com base nos dados extraídos e estimar Valuation.');
   const [valuationMultiple, setValuationMultiple] = useState(() => {
     try { const saved = localStorage.getItem(DEFAULT_EBITDA_MULTIPLE_KEY); return saved ? parseFloat(saved) : 5; } catch { return 5; }
   });
   const [accountingStandard, setAccountingStandard] = useState('IFRS 18 / CPC Brasil');
-  const [insightResult, setInsightResult] = useState<string>('');
-  const [isInsightLoading, setIsInsightLoading] = useState(false);
+  
+  const [ebitdaResult, setEbitdaResult] = useState<string>('');
+  const [cmvResult, setCmvResult] = useState<string>('');
+  
+  const [isEbitdaLoading, setIsEbitdaLoading] = useState(false);
+  const [isCmvLoading, setIsCmvLoading] = useState(false);
 
   const formatCurrency = (value: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+
+  const handleGenerateEBITDA = async () => {
+    if (!result) return;
+    setIsEbitdaLoading(true);
+    try {
+        const text = await generateFinancialInsight(result, insightPrompt, valuationMultiple, accountingStandard);
+        setEbitdaResult(text);
+    } catch (e) {
+        setEbitdaResult("Erro ao gerar análise. Verifique se a chave de API é válida e se há conexão com a internet.");
+        console.error(e);
+    } finally {
+        setIsEbitdaLoading(false);
+    }
+  };
+
+  const handleGenerateCMV = async () => {
+      if (!result) return;
+      setIsCmvLoading(true);
+      try {
+          const text = await generateCMVAnalysis(result, accountingStandard);
+          setCmvResult(text);
+      } catch (e) {
+          setCmvResult("Erro ao analisar CMV. Verifique se a chave de API é válida e se há conexão com a internet.");
+          console.error(e);
+      } finally {
+          setIsCmvLoading(false);
+      }
+  };
+
   const { summary, accounts = [], spell_check = [] } = result || {};
 
   const validSpellCheck = useMemo(() => {
@@ -67,11 +139,19 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
       return accounts.filter(a => a.possible_inversion && !a.is_synthetic);
   }, [accounts]);
 
-  const netResult = useMemo(() => summary ? summary.total_credits - summary.total_debits : 0, [summary]);
-  const profitLossLabel = useMemo(() => netResult >= 0 ? 'LUCRO / SUPERÁVIT' : 'PREJUÍZO / DÉFICIT', [netResult]);
-  const profitLossStyle = useMemo(() => netResult >= 0 
+  const finalResultValue = useMemo(() => {
+      if (summary?.specific_result_value !== undefined) return summary.specific_result_value;
+      return summary ? summary.total_credits - summary.total_debits : 0;
+  }, [summary]);
+
+  const finalResultLabel = useMemo(() => {
+      if (summary?.specific_result_label) return summary.specific_result_label;
+      return finalResultValue >= 0 ? 'LUCRO / SUPERÁVIT' : 'PREJUÍZO / DÉFICIT';
+  }, [summary, finalResultValue]);
+
+  const profitLossStyle = useMemo(() => finalResultValue >= 0 
       ? { text: 'text-blue-700 dark:text-blue-300', bg: 'bg-blue-50 dark:bg-blue-900/20', border: 'border-blue-200 dark:border-blue-800' }
-      : { text: 'text-red-700 dark:text-red-300', bg: 'bg-red-50 dark:bg-red-900/20', border: 'border-red-200 dark:border-red-800' }, [netResult]);
+      : { text: 'text-red-700 dark:text-red-300', bg: 'bg-red-50 dark:bg-red-900/20', border: 'border-red-200 dark:border-red-800' }, [finalResultValue]);
 
   const getDisplayedName = (account: ExtractedAccount) => {
       let correctedName = account.account_name;
@@ -83,6 +163,11 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
           }
       });
       return correctedName;
+  };
+  
+  const getSuggestionForAccount = (account: ExtractedAccount) => {
+      const corrected = getDisplayedName(account);
+      return corrected !== account.account_name ? corrected : null;
   };
 
   useEffect(() => { setIsTableLoading(true); setTimeout(() => setIsTableLoading(false), 600); }, [result]);
@@ -119,11 +204,9 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
     if (filterMinVal && !isNaN(parseFloat(filterMinVal))) processedAccounts = processedAccounts.filter(acc => Math.max(acc.debit_value, acc.credit_value) >= parseFloat(filterMinVal));
     if (filterMaxVal && !isNaN(parseFloat(filterMaxVal))) processedAccounts = processedAccounts.filter(acc => Math.max(acc.debit_value, acc.credit_value) <= parseFloat(filterMaxVal));
     if (filterInversion !== 'all') processedAccounts = processedAccounts.filter(acc => filterInversion === 'yes' ? acc.possible_inversion : !acc.possible_inversion);
-    if (filterHasCorrection) processedAccounts = processedAccounts.filter(acc => getDisplayedName(acc) !== acc.account_name);
+    if (filterHasCorrection) processedAccounts = processedAccounts.filter(acc => getSuggestionForAccount(acc) !== null);
 
-    // Hierarchy Filtering: Only show accounts if their parent is expanded
-    // We do this by checking if the account's parent code is in the expanded set.
-    if (!searchTerm && filterType === 'All' && !filterMinVal && !filterInversion) {
+    if (!searchTerm && filterType === 'All' && !filterMinVal && !filterInversion && !filterHasCorrection) {
         processedAccounts = processedAccounts.filter(acc => {
             if (!acc.account_code) return true;
             const parts = acc.account_code.split(/[.-]/);
@@ -146,418 +229,639 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
       });
     }
     return processedAccounts;
-  }, [accounts, sortConfig, searchTerm, filterType, filterMinVal, filterMaxVal, filterInversion, filterHasCorrection, expandedGroups]);
+  }, [accounts, sortConfig, searchTerm, filterType, filterMinVal, filterMaxVal, filterInversion, filterHasCorrection, expandedGroups, showCorrectedNames]);
 
   const paginatedAccounts = useMemo(() => filteredAndSortedAccounts.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage), [filteredAndSortedAccounts, currentPage, itemsPerPage]);
   const requestSort = (key: SortKey) => setSortConfig({ key, direction: sortConfig?.key === key && sortConfig.direction === 'asc' ? 'desc' : 'asc' });
 
-  // IFRS 18 Grouping
+  // IFRS Logic
   const ifrsGroups = useMemo(() => {
-      const groups = {
-          Operacional: [] as ExtractedAccount[],
-          Investimento: [] as ExtractedAccount[],
-          Financiamento: [] as ExtractedAccount[]
-      };
+      const groups = { Operacional: [] as ExtractedAccount[], Investimento: [] as ExtractedAccount[], Financiamento: [] as ExtractedAccount[] };
       accounts.forEach(acc => {
           if (acc.ifrs18_category === 'Operacional') groups.Operacional.push(acc);
           else if (acc.ifrs18_category === 'Investimento') groups.Investimento.push(acc);
           else if (acc.ifrs18_category === 'Financiamento') groups.Financiamento.push(acc);
-          else if (summary && summary.document_type === 'DRE') groups.Operacional.push(acc); 
       });
       return groups;
-  }, [accounts, summary]);
+  }, [accounts]);
+  
+  const hasIFRSData = ifrsGroups.Operacional.length + ifrsGroups.Investimento.length + ifrsGroups.Financiamento.length > 0;
+  
+  const toggleIFRSCategory = (cat: keyof typeof expandedIFRSCategories) => setExpandedIFRSCategories(prev => ({ ...prev, [cat]: !prev[cat] }));
+  const expandAllIFRS = () => { if(hasIFRSData) setExpandedIFRSCategories({ Operacional: true, Investimento: true, Financiamento: true }); };
+  const collapseAllIFRS = () => { if(hasIFRSData) setExpandedIFRSCategories({ Operacional: false, Investimento: false, Financiamento: false }); };
 
-  const totalIFRSAccounts = ifrsGroups.Operacional.length + ifrsGroups.Investimento.length + ifrsGroups.Financiamento.length;
-  const hasIFRSData = summary.document_type === 'DRE' && totalIFRSAccounts > 0;
-
-  const toggleIFRSCategory = (cat: keyof typeof expandedIFRSCategories) => {
-      setExpandedIFRSCategories(prev => ({ ...prev, [cat]: !prev[cat] }));
+  // --- PDF GENERATION LOGIC ---
+  const generatePDFDocument = () => {
+      const doc = new jsPDF();
+      
+      // Header
+      doc.setFillColor(37, 99, 235); // Blue
+      doc.rect(0, 0, 210, 20, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(16);
+      doc.text('Relatório de Análise Contábil - AuditAI', 14, 13);
+      
+      // Info
+      doc.setTextColor(0, 0, 0);
+      doc.setFontSize(11);
+      doc.text(`Empresa: ${headerData.companyName}`, 14, 30);
+      doc.text(`CNPJ: ${headerData.cnpj}`, 14, 36);
+      doc.text(`Responsável: ${headerData.collaboratorName}`, 14, 42);
+      doc.text(`Data: ${new Date().toLocaleDateString()}`, 150, 30);
+      
+      // Summary Table
+      doc.setFontSize(12);
+      doc.text('Resumo Financeiro', 14, 52);
+      
+      autoTable(doc, {
+          startY: 55,
+          head: [['Descrição', 'Valor']],
+          body: [
+              ['Total Débitos', formatCurrency(summary.total_debits)],
+              ['Total Créditos', formatCurrency(summary.total_credits)],
+              ['Resultado Líquido', formatCurrency(finalResultValue)],
+              ['Status', summary.is_balanced ? 'Balanceado' : 'Desbalanceado']
+          ],
+          theme: 'striped',
+          headStyles: { fillColor: [37, 99, 235] }
+      });
+      
+      let finalY = (doc as any).lastAutoTable.finalY + 10;
+      
+      // Observations
+      if (summary.observations.length > 0) {
+          doc.text('Observações e Insights da IA', 14, finalY);
+          finalY += 5;
+          const obsText = summary.observations.map(o => `• ${o}`).join('\n');
+          doc.setFontSize(10);
+          const splitObs = doc.splitTextToSize(obsText, 180);
+          doc.text(splitObs, 14, finalY);
+          finalY += (splitObs.length * 5) + 10;
+      }
+      
+      // Inconsistencies (if any)
+      if (invertedAccounts.length > 0) {
+          doc.setTextColor(220, 38, 38); // Red
+          doc.text(`Alerta: ${invertedAccounts.length} Contas com Natureza Invertida`, 14, finalY);
+          doc.setTextColor(0, 0, 0);
+          
+          autoTable(doc, {
+              startY: finalY + 5,
+              head: [['Código', 'Conta', 'Saldo Invertido']],
+              body: invertedAccounts.map(acc => [
+                  acc.account_code || '-',
+                  acc.account_name,
+                  formatCurrency(acc.final_balance)
+              ]),
+              theme: 'grid',
+              headStyles: { fillColor: [220, 38, 38] }
+          });
+      }
+      
+      return doc;
   };
 
-  const expandAllIFRS = () => setExpandedIFRSCategories({ Operacional: true, Investimento: true, Financiamento: true });
-  const collapseAllIFRS = () => setExpandedIFRSCategories({ Operacional: false, Investimento: false, Financiamento: false });
-
-  const handleGenerateInsight = async () => {
-      if (!insightPrompt) return;
-      setIsInsightLoading(true);
-      try {
-          const text = await generateFinancialInsight(result, insightPrompt, valuationMultiple, accountingStandard);
-          setInsightResult(text);
-      } catch (error) { setInsightResult("Erro ao gerar análise."); } 
-      finally { setIsInsightLoading(false); }
+  const handleDownloadPDF = () => {
+      const doc = generatePDFDocument();
+      doc.save(`Relatorio_${headerData.companyName.replace(/\s+/g, '_')}.pdf`);
   };
 
-  const handleGenerateCMV = async () => {
-      setIsInsightLoading(true);
-      try {
-          const text = await generateCMVAnalysis(result, accountingStandard);
-          setInsightResult(text);
-          setIsValuationExpanded(true);
-          document.getElementById('valuation')?.scrollIntoView({ behavior: 'smooth' });
-      } catch (error) { setInsightResult("Erro na análise CMV."); }
-      finally { setIsInsightLoading(false); }
+  const handleEmailExport = () => {
+    // 1. Generate and Download PDF first
+    handleDownloadPDF();
+    
+    // 2. Open Mail Client with Instructions
+    const subject = `Análise Contábil - ${headerData.companyName}`;
+    const body = `
+Olá,
+
+Segue resumo da análise contábil realizada pelo AuditAI.
+
+EMPRESA: ${headerData.companyName}
+CNPJ: ${headerData.cnpj}
+RESPONSÁVEL: ${headerData.collaboratorName}
+
+--- RESUMO ---
+Documento: ${summary.document_type}
+Resultado: ${formatCurrency(finalResultValue)}
+Status: ${summary.is_balanced ? 'Balanceado' : 'Desbalanceado'}
+
+*** IMPORTANTE: O Relatório PDF completo foi baixado para o seu dispositivo. Por favor, anexe-o a este e-mail. ***
+    `.trim();
+
+    window.open(`mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`);
   };
+
+  const exportPDFContent = (title: string, content: string) => {
+      if (!content) return;
+      const doc = new jsPDF();
+      doc.setFontSize(16);
+      doc.text(title, 20, 20);
+      doc.setFontSize(10);
+      doc.text(`Empresa: ${headerData.companyName}`, 20, 30);
+      doc.text(`Data: ${new Date().toLocaleDateString()}`, 20, 35);
+      
+      const splitText = doc.splitTextToSize(content, 170);
+      doc.text(splitText, 20, 50);
+      doc.save(`${title.replace(/\s+/g, '_')}_${headerData.companyName.replace(/\s+/g, '_')}.pdf`);
+  };
+
+  const balanceReason = useMemo(() => {
+    if (summary.is_balanced) return '';
+    return summary.total_debits > summary.total_credits 
+        ? 'Débitos excedem Créditos' 
+        : 'Créditos excedem Débitos';
+  }, [summary]);
 
   if (!summary) return null;
 
   return (
     <div className="space-y-8 animate-fadeIn relative">
-      
-      {/* HEADER WITH COMPANY INFO */}
-      <div className="bg-white dark:bg-slate-800 p-6 rounded-xl shadow-sm mb-2 border border-slate-200 dark:border-slate-700">
+      <div className="bg-white dark:bg-slate-800 p-6 rounded-xl shadow-sm mb-2 border border-slate-200 dark:border-slate-700 print:hidden">
         <h2 className="text-2xl font-bold text-slate-800 dark:text-white">{headerData.companyName || 'Empresa não identificada'}</h2>
         <div className="flex flex-col md:flex-row md:items-center gap-2 mt-1 text-slate-500 dark:text-slate-400 text-sm font-medium">
-            {headerData.cnpj && (
-                <span className="flex items-center gap-1">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M3.75 21h16.5M4.5 3h15M5.25 3v18m13.5-18v18M9 6.75h1.5m-1.5 3h1.5m-1.5 3h1.5m3-6H15m-1.5 3H15m-1.5 3H15M9 21v-3.375c0-.621.504-1.125 1.125-1.125h3.75c.621 0 1.125.504 1.125 1.125V21" /></svg>
-                    {headerData.cnpj}
-                </span>
-            )}
-            {summary.period && (
-                <>
-                    <span className="hidden md:inline mx-1">•</span>
-                    <span className="flex items-center gap-1">
-                        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4"><path strokeLinecap="round" strokeLinejoin="round" d="M6.75 3v2.25M17.25 3v2.25M3 18.75V7.5a2.25 2.25 0 012.25-2.25h13.5A2.25 2.25 0 0121 7.5v11.25m-18 0h18M5.25 12h13.5" /></svg>
-                        {summary.period}
-                    </span>
-                </>
-            )}
+            {headerData.cnpj && <span>CNPJ: {headerData.cnpj}</span>}
+            {summary.period && <span>• Período: {summary.period}</span>}
         </div>
       </div>
 
-      <div id="summary" className="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden">
-        <div className="bg-slate-800 dark:bg-slate-900 px-6 py-4 flex justify-between items-center">
-          <h3 className="text-xl font-semibold text-white">Resumo: {summary.document_type}</h3>
-          <button onClick={() => { setInsightPrompt("Calcular EBITDA"); setIsValuationExpanded(true); document.getElementById('valuation')?.scrollIntoView(); }} className="text-sm bg-yellow-600 hover:bg-yellow-500 text-white py-2 px-3 rounded border border-yellow-500">⚡ EBITDA</button>
+      <div id="summary" className="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden print:shadow-none print:border-none">
+        <div className="bg-slate-800 dark:bg-slate-900 px-6 py-4 flex justify-between items-center print:bg-white print:text-black print:px-0 print:border-b">
+          <h3 className="text-xl font-semibold text-white print:text-black">Resumo: {summary.document_type}</h3>
+          <div className="flex gap-2 print:hidden">
+              <button 
+                onClick={handleDownloadPDF}
+                className="text-xs bg-white/10 hover:bg-white/20 text-white px-3 py-1.5 rounded border border-white/20 transition-colors flex items-center gap-2"
+                title="Baixar Relatório PDF Formatado"
+              >
+                <span>📄</span> Baixar PDF / Imprimir
+              </button>
+              <button 
+                onClick={handleEmailExport}
+                className="text-xs bg-blue-500 hover:bg-blue-600 text-white px-3 py-1.5 rounded border border-blue-400 transition-colors flex items-center gap-2 font-bold"
+                title="Gerar PDF e abrir E-mail"
+              >
+                <span>✉️</span> Enviar por E-mail
+              </button>
+          </div>
         </div>
-        <div className="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-            <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded border border-blue-100 dark:border-blue-800"><p className="text-sm text-blue-600 font-medium">Débitos (Analítico)</p><p className="text-2xl font-bold text-blue-900 dark:text-blue-100">{formatCurrency(summary.total_debits)}</p></div>
-            <div className="p-4 bg-red-50 dark:bg-red-900/20 rounded border border-red-100 dark:border-red-800"><p className="text-sm text-red-600 font-medium">Créditos (Analítico)</p><p className="text-2xl font-bold text-red-900 dark:text-red-100">{formatCurrency(summary.total_credits)}</p></div>
-            <div className={`p-4 rounded border ${profitLossStyle.bg} ${profitLossStyle.border}`}><p className={`text-sm font-bold ${profitLossStyle.text}`}>{profitLossLabel}</p><p className={`text-2xl font-bold ${profitLossStyle.text}`}>{formatCurrency(netResult)}</p></div>
-            <div className={`p-4 rounded border ${summary.is_balanced ? 'bg-green-50 border-green-100' : 'bg-red-50 border-red-100'}`}><p className="text-sm font-medium">Status</p><span className={`text-lg font-bold ${summary.is_balanced ? 'text-green-800' : 'text-red-800'}`}>{summary.is_balanced ? 'Balanceado' : 'Desbalanceado'}</span></div>
+        <div className="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 print:grid-cols-2 print:gap-4">
+            <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded border border-blue-100 dark:border-blue-800">
+                <p className="text-sm text-blue-600 font-medium">Débitos (Analítico)</p>
+                <p className="text-2xl font-bold text-blue-900 dark:text-blue-100">{formatCurrency(summary.total_debits)}</p>
+                <p className="text-[10px] text-blue-500 mt-1 italic">(Ativos + Despesas + Custos)</p>
+            </div>
+            <div className="p-4 bg-red-50 dark:bg-red-900/20 rounded border border-red-100 dark:border-red-800">
+                <p className="text-sm text-red-600 font-medium">Créditos (Analítico)</p>
+                <p className="text-2xl font-bold text-red-900 dark:text-red-100">{formatCurrency(summary.total_credits)}</p>
+                <p className="text-[10px] text-red-500 mt-1 italic">(Passivos + Receitas + PL)</p>
+            </div>
+            <div className={`p-4 rounded border ${profitLossStyle.bg} ${profitLossStyle.border}`}>
+                <p className={`text-sm font-bold ${profitLossStyle.text}`}>{finalResultLabel}</p>
+                <p className={`text-2xl font-bold ${profitLossStyle.text}`}>{formatCurrency(finalResultValue)}</p>
+                {!summary.specific_result_label && (
+                   <p className={`text-[10px] opacity-80 mt-1 italic ${profitLossStyle.text}`}>(Total Créditos - Total Débitos)</p>
+                )}
+            </div>
+            <div className={`p-4 rounded border ${summary.is_balanced ? 'bg-green-50 border-green-100' : 'bg-red-50 border-red-100'}`}>
+                <p className="text-sm font-medium">Status do Balancete</p>
+                <span className={`text-lg font-bold ${summary.is_balanced ? 'text-green-800' : 'text-red-800'}`}>{summary.is_balanced ? 'Balanceado' : 'Desbalanceado'}</span>
+                {!summary.is_balanced && (
+                    <div className="mt-1">
+                        <span className="text-xs text-red-700 block font-bold">Diferença: {formatCurrency(summary.discrepancy_amount)}</span>
+                        <span className="text-[10px] text-red-600 italic block">Motivo: {balanceReason}</span>
+                    </div>
+                )}
+            </div>
         </div>
-        
-        {/* AI SUMMARY NARRATIVE */}
+
         <div className="px-6 pb-6">
             <div className="p-4 bg-indigo-50 dark:bg-indigo-900/20 rounded-lg border border-indigo-100 dark:border-indigo-800">
-                <h4 className="text-sm font-bold text-indigo-700 dark:text-indigo-300 mb-4 flex items-center gap-2">
-                    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5"><path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.456 2.456L21.75 6l-1.035.259a3.375 3.375 0 00-2.456 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" /></svg>
-                    Resumo Detalhado da Análise IA
-                </h4>
+                <h4 className="text-sm font-bold text-indigo-700 dark:text-indigo-300 mb-4 border-b border-indigo-200 dark:border-indigo-800 pb-2">Resumo Detalhado da Análise IA</h4>
                 
-                {/* EVIDENCE ANALYTICAL TOTALS & COMPOSITION */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm mb-6">
-                        <div className="bg-white/60 dark:bg-slate-800/60 p-3 rounded border border-indigo-100 dark:border-indigo-900/50">
-                            <div className="flex justify-between items-baseline mb-1">
-                                <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Total Débitos (Analítico)</span>
-                                <span className="font-mono font-bold text-blue-700 dark:text-blue-300 text-lg">{formatCurrency(summary.total_debits)}</span>
-                            </div>
-                            <p className="text-xs text-slate-500 dark:text-slate-400">
-                                Composição: Soma de todas as contas analíticas de natureza devedora, incluindo <strong>Ativos</strong> e <strong>Despesas</strong>.
-                            </p>
-                        </div>
-                        <div className="bg-white/60 dark:bg-slate-800/60 p-3 rounded border border-indigo-100 dark:border-indigo-900/50">
-                            <div className="flex justify-between items-baseline mb-1">
-                                <span className="text-xs font-bold text-slate-500 uppercase tracking-wide">Total Créditos (Analítico)</span>
-                                <span className="font-mono font-bold text-red-700 dark:text-red-300 text-lg">{formatCurrency(summary.total_credits)}</span>
-                            </div>
-                            <p className="text-xs text-slate-500 dark:text-slate-400">
-                                Composição: Soma de todas as contas analíticas de natureza credora, incluindo <strong>Passivos</strong>, <strong>Patrimônio Líquido</strong> e <strong>Receitas</strong>.
-                            </p>
-                        </div>
-                </div>
-
-                {/* INVERTED ACCOUNTS SUMMARY */}
+                {/* --- SEÇÃO DE INCONSISTÊNCIAS / ERROS --- */}
                 {invertedAccounts.length > 0 && (
-                     <div className="mb-6 bg-amber-50 dark:bg-amber-900/20 p-3 rounded border border-amber-200 dark:border-amber-800/50">
-                         <h5 className="font-bold text-amber-800 dark:text-amber-500 text-xs uppercase mb-2">Anomalias Identificadas (Inversões)</h5>
-                         <p className="text-sm text-amber-900 dark:text-amber-200">
-                             Foram detectadas <strong>{invertedAccounts.length}</strong> contas com saldo invertido (natureza contrária). 
-                             Contas como: <span className="italic">{invertedAccounts.slice(0, 3).map(a => a.account_name).join(', ')}{invertedAccounts.length > 3 ? '...' : ''}</span>.
-                         </p>
+                     <div className="mb-6 border border-yellow-300 bg-yellow-50 dark:bg-yellow-900/20 rounded overflow-hidden">
+                         <button 
+                             onClick={() => setIsInversionExpanded(!isInversionExpanded)}
+                             className="w-full flex justify-between items-center p-3 bg-yellow-100 dark:bg-yellow-900/40 hover:bg-yellow-200 transition-colors"
+                         >
+                            <h5 className="font-bold text-yellow-800 dark:text-yellow-500 text-xs uppercase flex items-center">
+                                <span className="text-lg mr-2">⚠️</span> 
+                                Relatório de Inconsistências (Inversões de Natureza): {invertedAccounts.length}
+                            </h5>
+                            <span className="text-yellow-700">{isInversionExpanded ? '▼' : '▶'}</span>
+                         </button>
+                         
+                         {isInversionExpanded && (
+                             <div className="p-3">
+                                 <p className="text-xs text-yellow-900 dark:text-yellow-200 mb-3">
+                                     As seguintes contas apresentam saldo final contrário à sua natureza contábil (Ex: Ativo com saldo Credor):
+                                 </p>
+                                 <div className="max-h-60 overflow-y-auto">
+                                     <table className="w-full text-xs text-left">
+                                         <thead className="bg-yellow-100/50 dark:bg-yellow-900/50 text-yellow-800 dark:text-yellow-400 font-bold">
+                                             <tr>
+                                                 <th className="p-2">Código</th>
+                                                 <th className="p-2">Conta</th>
+                                                 <th className="p-2 text-right">Saldo (Inv.)</th>
+                                             </tr>
+                                         </thead>
+                                         <tbody className="divide-y divide-yellow-200 dark:divide-yellow-800">
+                                             {invertedAccounts.map((acc, idx) => (
+                                                 <tr key={idx} className="hover:bg-yellow-100/30">
+                                                     <td className="p-2 font-mono">{acc.account_code || '-'}</td>
+                                                     <td className="p-2">{acc.account_name}</td>
+                                                     <td className="p-2 text-right font-bold text-red-600 dark:text-red-400">{formatCurrency(acc.final_balance)}</td>
+                                                 </tr>
+                                             ))}
+                                         </tbody>
+                                     </table>
+                                 </div>
+                             </div>
+                         )}
+                     </div>
+                )}
+
+                {/* --- SEÇÃO DE CORREÇÕES ORTOGRÁFICAS --- */}
+                {validSpellCheck.length > 0 && (
+                     <div className="mb-6 border border-purple-200 bg-purple-50 dark:bg-purple-900/20 rounded overflow-hidden">
+                         <div className="p-3 bg-purple-100 dark:bg-purple-900/40">
+                             <h5 className="font-bold text-purple-800 dark:text-purple-400 text-xs uppercase flex items-center">
+                                 <span className="text-lg mr-2">🔤</span> 
+                                 Sugestões de Correção Ortográfica: {validSpellCheck.length}
+                             </h5>
+                         </div>
+                         <div className="p-3 max-h-40 overflow-y-auto grid grid-cols-1 md:grid-cols-2 gap-2">
+                             {validSpellCheck.map((item, idx) => (
+                                 <div key={idx} className="flex justify-between items-center text-xs border-b border-purple-100 dark:border-purple-800 pb-1">
+                                     <span className="text-red-500 line-through mr-2">{item.original_term}</span>
+                                     <span className="text-green-600 font-bold">➜ {item.suggested_correction}</span>
+                                 </div>
+                             ))}
+                         </div>
                      </div>
                 )}
 
                 <div className="mt-4">
-                    <h5 className="font-bold text-slate-700 dark:text-slate-300 text-xs uppercase mb-2">Observações Gerais da IA:</h5>
+                    <h5 className="font-bold text-slate-700 dark:text-slate-300 text-xs uppercase mb-2">Observações Gerais da Auditoria IA:</h5>
                     <ul className="list-disc list-inside text-sm text-slate-700 dark:text-slate-300 space-y-1">
-                        {summary.observations.length > 0 ? (
-                            summary.observations.map((obs, i) => <li key={i}>{obs}</li>)
-                        ) : (
-                            <li className="italic text-slate-500">Nenhuma observação adicional gerada.</li>
-                        )}
+                        {summary.observations.length > 0 ? summary.observations.map((obs, i) => <li key={i}>{obs}</li>) : <li className="italic">Gerando análise detalhada...</li>}
                     </ul>
                 </div>
             </div>
          </div>
       </div>
 
-      {/* SPELL CHECK SUGGESTIONS SECTION */}
-      {validSpellCheck.length > 0 && (
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-              <div className="bg-teal-700 px-6 py-4 flex justify-between cursor-pointer hover:bg-teal-600 transition-colors" onClick={() => setIsSpellCheckExpanded(!isSpellCheckExpanded)}>
-                  <h3 className="text-lg font-semibold text-white flex items-center">
-                      📝 Sugestões de Correção Ortográfica ({validSpellCheck.length})
-                  </h3>
-                  <span className="text-white">{isSpellCheckExpanded ? '▲' : '▼'}</span>
-              </div>
-              {isSpellCheckExpanded && (
-                  <div className="p-4 max-h-96 overflow-y-auto bg-slate-50 dark:bg-slate-900">
-                      <table className="min-w-full text-sm text-left">
-                          <thead className="bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400">
-                              <tr>
-                                  <th className="p-2 rounded-tl-lg">Termo Original</th>
-                                  <th className="p-2">Sugestão IA</th>
-                                  <th className="p-2 rounded-tr-lg">Confiança</th>
-                              </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-200 dark:divide-slate-700">
-                              {validSpellCheck.map((item, idx) => (
-                                  <tr key={idx} className="bg-white dark:bg-slate-800 hover:bg-slate-50 dark:hover:bg-slate-700">
-                                      <td className="p-2 font-mono text-red-600 dark:text-red-400">{item.original_term}</td>
-                                      <td className="p-2 font-bold text-green-600 dark:text-green-400">{item.suggested_correction}</td>
-                                      <td className="p-2">
-                                          <span className={`px-2 py-0.5 rounded text-xs ${item.confidence === 'High' ? 'bg-green-100 text-green-800' : 'bg-yellow-100 text-yellow-800'}`}>
-                                              {item.confidence === 'High' ? 'Alta' : 'Média'}
-                                          </span>
-                                      </td>
-                                  </tr>
-                              ))}
-                          </tbody>
-                      </table>
-                  </div>
-              )}
+      {/* NEW FINANCIAL TOOLS SECTION (SEPARATED) */}
+      <div id="valuation" className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden print:hidden">
+          <div className="px-6 py-4 bg-emerald-700 dark:bg-emerald-900 border-b dark:border-slate-700 flex justify-between items-center">
+              <h3 className="text-lg font-semibold text-white">Ferramentas Financeiras & Valuation (IA)</h3>
+              <button onClick={() => setIsValuationExpanded(!isValuationExpanded)} className="text-white hover:text-emerald-200 font-mono text-xl">{isValuationExpanded ? '▼' : '▶'}</button>
           </div>
-      )}
-
-      {/* IFRS 18 DRE SEction */}
-      {summary.document_type === 'DRE' && (
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-              <div className="bg-teal-900 px-6 py-4 flex justify-between items-center">
-                  <h3 className="text-lg font-semibold text-white">Análise IFRS 18 (DRE)</h3>
-                  <div className="flex gap-2">
-                      <button 
-                          onClick={expandAllIFRS} 
-                          disabled={!hasIFRSData}
-                          className={`text-xs bg-teal-800 hover:bg-teal-700 text-white py-1 px-2 rounded border border-teal-700 ${!hasIFRSData ? 'opacity-50 cursor-not-allowed' : ''}`}
-                      >
-                          Expandir Tudo
-                      </button>
-                      <button 
-                          onClick={collapseAllIFRS} 
-                          disabled={!hasIFRSData}
-                          className={`text-xs bg-teal-800 hover:bg-teal-700 text-white py-1 px-2 rounded border border-teal-700 ${!hasIFRSData ? 'opacity-50 cursor-not-allowed' : ''}`}
-                      >
-                          Recolher Tudo
-                      </button>
-                  </div>
-              </div>
-              {hasIFRSData ? (
-                  <div className="p-4 space-y-2">
-                      {Object.entries(ifrsGroups).map(([category, value]) => {
-                          const catAccounts = value as ExtractedAccount[];
-                          if (catAccounts.length === 0) return null;
-                          return (
-                          <div key={category} className="border rounded-lg dark:border-slate-700 overflow-hidden">
-                              <div 
-                                  className="bg-slate-50 dark:bg-slate-700 p-3 flex justify-between cursor-pointer hover:bg-slate-100 dark:hover:bg-slate-600"
-                                  onClick={() => toggleIFRSCategory(category as any)}
-                              >
-                                  <div className="font-bold text-slate-700 dark:text-white">{category} ({catAccounts.length})</div>
-                                  <div className="flex items-center gap-4">
-                                      <span className="text-sm font-mono font-semibold text-slate-600 dark:text-slate-300">
-                                          {formatCurrency(catAccounts.reduce((sum, a) => sum + a.total_value, 0))}
-                                      </span>
-                                      <span className="text-slate-500">{expandedIFRSCategories[category as keyof typeof expandedIFRSCategories] ? '▲' : '▼'}</span>
-                                  </div>
-                              </div>
-                              {expandedIFRSCategories[category as keyof typeof expandedIFRSCategories] && (
-                                  <div className="p-3 bg-white dark:bg-slate-800">
-                                      <table className="min-w-full text-sm">
-                                          <tbody>
-                                              {catAccounts.map((acc, idx) => (
-                                                  <tr key={idx} className="border-b dark:border-slate-700 last:border-0">
-                                                      <td className="py-1 text-slate-600 dark:text-slate-300">{acc.account_name}</td>
-                                                      <td className="py-1 text-right font-mono">{formatCurrency(acc.total_value)}</td>
-                                                  </tr>
-                                              ))}
-                                          </tbody>
-                                      </table>
-                                  </div>
-                              )}
-                          </div>
-                      )})}
-                  </div>
-              ) : (
-                  <div className="p-6 text-center text-slate-500 dark:text-slate-400 italic">
-                      Nenhuma conta detalhada identificada para categorização IFRS 18.
-                  </div>
-              )}
-          </div>
-      )}
-
-      <div id="valuation" className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-         <div className="bg-indigo-900 px-6 py-4 flex justify-between cursor-pointer" onClick={() => setIsValuationExpanded(!isValuationExpanded)}>
-            <h3 className="text-lg font-semibold text-white">Ferramentas Financeiras & Valuation (IA)</h3>
-            <span className="text-white">{isValuationExpanded ? '▲' : '▼'}</span>
-         </div>
-         {isValuationExpanded && (
-             <div className="p-6 space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div><label className="block text-sm font-medium mb-1 dark:text-white">Norma Contábil</label><select value={accountingStandard} onChange={e => setAccountingStandard(e.target.value)} className="w-full border rounded p-2 dark:bg-slate-700 dark:text-white"><option>IFRS 18 / CPC Brasil</option><option>US GAAP</option><option>IFRS International</option></select></div>
-                    <div><label className="block text-sm font-medium mb-1 dark:text-white">Múltiplo Valuation (x EBITDA)</label><input type="range" min="1" max="20" step="0.5" value={valuationMultiple} onChange={e => { const v = parseFloat(e.target.value); setValuationMultiple(v); localStorage.setItem(DEFAULT_EBITDA_MULTIPLE_KEY, String(v)); }} className="w-full" /><div className="text-right text-sm dark:text-white">{valuationMultiple}x</div></div>
-                    <div className="flex items-end"><button onClick={handleGenerateCMV} className="w-full bg-purple-600 hover:bg-purple-700 text-white py-2 rounded">Análise de CMV (Lei Vigente)</button></div>
+          {isValuationExpanded && (
+            <div className="p-6 space-y-8">
+                
+                {/* TOOL 1: EBITDA & VALUATION */}
+                <div className="border border-slate-200 dark:border-slate-700 rounded-lg p-5">
+                    <h4 className="font-bold text-emerald-800 dark:text-emerald-400 mb-4 flex items-center gap-2">
+                        <span className="text-xl">📊</span> EBITDA & Valuation
+                    </h4>
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div className="lg:col-span-1 space-y-4">
+                             <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Prompt da Análise</label>
+                                <textarea 
+                                    value={insightPrompt}
+                                    onChange={(e) => setInsightPrompt(e.target.value)}
+                                    className="w-full h-24 p-2 border rounded text-sm dark:bg-slate-700 dark:text-white resize-none"
+                                    placeholder="Ex: Calcular EBITDA detalhado..."
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Múltiplo de Valuation: {valuationMultiple}x</label>
+                                <input 
+                                    type="range" min="1" max="10" step="0.5" 
+                                    value={valuationMultiple}
+                                    onChange={(e) => {
+                                        const val = parseFloat(e.target.value);
+                                        setValuationMultiple(val);
+                                        localStorage.setItem(DEFAULT_EBITDA_MULTIPLE_KEY, val.toString());
+                                    }}
+                                    className="w-full h-2 bg-emerald-200 rounded-lg appearance-none cursor-pointer accent-emerald-600"
+                                />
+                                <div className="flex justify-between text-[10px] text-slate-500 mt-1"><span>1x (Baixo)</span><span>10x (Alto)</span></div>
+                            </div>
+                            <button 
+                                onClick={handleGenerateEBITDA}
+                                disabled={isEbitdaLoading}
+                                className="w-full py-2 bg-emerald-600 text-white rounded font-bold hover:bg-emerald-700 disabled:opacity-50 transition-colors text-sm"
+                            >
+                                {isEbitdaLoading ? 'Calculando...' : '⚡ Calcular EBITDA & Valuation'}
+                            </button>
+                        </div>
+                        <div className="lg:col-span-2 bg-slate-50 dark:bg-slate-900/50 p-4 rounded border border-slate-200 dark:border-slate-700 min-h-[200px]">
+                             {ebitdaResult ? (
+                                <div className="prose dark:prose-invert max-w-none text-sm">
+                                    <div className="flex justify-between items-center mb-4 border-b pb-2 border-slate-200 dark:border-slate-700">
+                                        <span className="font-bold text-emerald-700 dark:text-emerald-500">Resultado EBITDA</span>
+                                        <button onClick={() => exportPDFContent('Relatório EBITDA e Valuation', ebitdaResult)} className="text-xs bg-emerald-100 text-emerald-700 px-2 py-1 rounded border border-emerald-200 hover:bg-emerald-200">📄 PDF</button>
+                                    </div>
+                                    <pre className="whitespace-pre-wrap font-sans text-slate-700 dark:text-slate-300">{ebitdaResult}</pre>
+                                </div>
+                            ) : (
+                                <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                                    <p className="text-sm">Preencha o prompt e clique em calcular.</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
                 </div>
-                <textarea value={insightPrompt} onChange={e => setInsightPrompt(e.target.value)} className="w-full p-3 border rounded dark:bg-slate-700 dark:text-white" rows={3} placeholder="Pergunta para IA..." />
-                <button onClick={handleGenerateInsight} disabled={isInsightLoading} className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-2 rounded w-full">{isInsightLoading ? 'Processando...' : 'Gerar Análise / Valuation'}</button>
-                {insightResult && <div className="mt-4 p-4 bg-slate-50 dark:bg-slate-900 rounded border dark:border-slate-700 whitespace-pre-wrap dark:text-slate-300">{insightResult}</div>}
-             </div>
-         )}
+
+                {/* TOOL 2: CMV Analysis */}
+                <div className="border border-slate-200 dark:border-slate-700 rounded-lg p-5">
+                    <h4 className="font-bold text-blue-800 dark:text-blue-400 mb-4 flex items-center gap-2">
+                        <span className="text-xl">📉</span> Análise de CMV (Lei Vigente)
+                    </h4>
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div className="lg:col-span-1 space-y-4">
+                            <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                                A IA irá auditar as contas de Custo das Mercadorias Vendidas baseando-se na norma contábil selecionada e na legislação fiscal atual.
+                            </p>
+                             <button 
+                                onClick={handleGenerateCMV}
+                                disabled={isCmvLoading}
+                                className="w-full py-2 bg-blue-600 text-white rounded font-bold hover:bg-blue-700 disabled:opacity-50 transition-colors text-sm"
+                            >
+                                {isCmvLoading ? 'Analisando...' : '🔍 Analisar CMV'}
+                            </button>
+                        </div>
+                        <div className="lg:col-span-2 bg-slate-50 dark:bg-slate-900/50 p-4 rounded border border-slate-200 dark:border-slate-700 min-h-[150px]">
+                             {cmvResult ? (
+                                <div className="prose dark:prose-invert max-w-none text-sm">
+                                    <div className="flex justify-between items-center mb-4 border-b pb-2 border-slate-200 dark:border-slate-700">
+                                        <span className="font-bold text-blue-700 dark:text-blue-500">Resultado CMV</span>
+                                        <button onClick={() => exportPDFContent('Relatório de Análise CMV', cmvResult)} className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded border border-blue-200 hover:bg-blue-200">📄 PDF</button>
+                                    </div>
+                                    <pre className="whitespace-pre-wrap font-sans text-slate-700 dark:text-slate-300">{cmvResult}</pre>
+                                </div>
+                            ) : (
+                                <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                                    <p className="text-sm">Clique em Analisar para iniciar a auditoria de custos.</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+          )}
       </div>
 
+      {/* SPELL CHECK SECTION (Still accessible in dropdown, but now summarized above) */}
+      {/* Keeping this as a detailed view if user wants to see the table form */}
+
+      {/* DRE IFRS SECTION */}
+      {summary.document_type === 'DRE' && (
+        <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden print:hidden">
+             <div className="px-6 py-4 bg-slate-100 dark:bg-slate-900 border-b dark:border-slate-700 flex justify-between items-center">
+                 <h3 className="text-lg font-semibold dark:text-white">Análise IFRS 18 (DRE)</h3>
+                 <div className="flex gap-2">
+                     <button onClick={expandAllIFRS} disabled={!hasIFRSData} className="px-3 py-1 rounded bg-slate-200 disabled:opacity-50 text-xs hover:bg-slate-300 text-slate-700">Expandir Tudo</button>
+                     <button onClick={collapseAllIFRS} disabled={!hasIFRSData} className="px-3 py-1 rounded bg-slate-200 disabled:opacity-50 text-xs hover:bg-slate-300 text-slate-700">Recolher Tudo</button>
+                 </div>
+             </div>
+             <div className="p-4">
+                 {!hasIFRSData ? <p className="text-center text-slate-500 italic py-4">Nenhuma conta DRE categorizada encontrada.</p> : (
+                     <div className="space-y-4">
+                         {Object.entries(ifrsGroups).map(([category, itemsRaw]) => {
+                             const items = itemsRaw as ExtractedAccount[];
+                             return (
+                                <div key={category} className="border rounded dark:border-slate-700">
+                                    <button onClick={() => toggleIFRSCategory(category as keyof typeof expandedIFRSCategories)} className="w-full flex justify-between items-center p-3 bg-slate-50 dark:bg-slate-700/50 hover:bg-slate-100">
+                                        <span className="font-bold text-slate-800 dark:text-white">{category} ({items.length})</span>
+                                        <span className="text-slate-500">{expandedIFRSCategories[category as keyof typeof expandedIFRSCategories] ? '▼' : '▶'}</span>
+                                    </button>
+                                    {expandedIFRSCategories[category as keyof typeof expandedIFRSCategories] && items.length > 0 && (
+                                        <div className="p-3 bg-white dark:bg-slate-800">
+                                            <ul className="text-sm space-y-1">
+                                                {items.map(i => <li key={i.account_code || i.account_name} className="flex justify-between border-b border-dashed border-slate-200 dark:border-slate-700 py-1 text-slate-700 dark:text-slate-300"><span>{i.account_name}</span><span className="font-mono">{formatCurrency(i.total_value)}</span></li>)}
+                                            </ul>
+                                        </div>
+                                    )}
+                                </div>
+                             );
+                         })}
+                     </div>
+                 )}
+             </div>
+        </div>
+      )}
+
       <div id="accounts" className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-         <div className="px-6 py-4 border-b dark:border-slate-700 flex justify-between items-center">
+         <div className="px-6 py-4 border-b dark:border-slate-700 flex flex-wrap justify-between items-center gap-3 print:bg-slate-100">
             <h3 className="text-lg font-semibold dark:text-white">Contas ({filteredAndSortedAccounts.length})</h3>
-            <div className="flex gap-2">
-                {validSpellCheck.length > 0 && (
-                    <button 
-                        onClick={() => setShowCorrectedNames(!showCorrectedNames)} 
-                        className={`px-3 py-2 rounded text-sm font-semibold border transition-all shadow-sm ${showCorrectedNames ? 'bg-green-600 hover:bg-green-700 text-white border-green-700' : 'bg-white hover:bg-slate-50 text-slate-700 border-slate-300'}`}
-                    >
-                        {showCorrectedNames ? '✔ Nomes Corrigidos' : 'Visualizar Correções'}
-                    </button>
-                )}
-                <button onClick={() => setShowFilters(!showFilters)} className="bg-blue-600 text-white px-3 py-2 rounded text-sm flex items-center gap-1">
-                    Filtros Avançados {showFilters ? '▲' : '▼'}
+            <div className="flex flex-wrap gap-2 print:hidden">
+                <button 
+                    onClick={() => setShowThemeSettings(!showThemeSettings)}
+                    className={`px-3 py-2 rounded text-sm border flex items-center gap-2 transition-colors ${showThemeSettings ? 'bg-slate-100 dark:bg-slate-700' : 'bg-white dark:bg-slate-800'}`}
+                >
+                    🎨 Aparência
                 </button>
-                <button onClick={expandAllGroups} className="bg-slate-200 hover:bg-slate-300 text-slate-800 px-3 py-2 rounded text-sm border border-slate-300">Expandir Tudo</button>
-                <button onClick={collapseAllGroups} className="bg-slate-200 hover:bg-slate-300 text-slate-800 px-3 py-2 rounded text-sm border border-slate-300">Recolher Tudo</button>
+                <button 
+                    onClick={() => setShowCorrectedNames(!showCorrectedNames)} 
+                    className={`px-3 py-2 rounded text-sm border flex items-center gap-2 transition-colors ${
+                        showCorrectedNames 
+                        ? 'bg-purple-100 border-purple-300 text-purple-700 font-bold dark:bg-purple-900/40 dark:text-purple-300' 
+                        : 'bg-white border-slate-300 text-slate-600 hover:bg-slate-50 dark:bg-slate-700 dark:border-slate-600 dark:text-white'
+                    }`}
+                    title="Alternar entre nome original do arquivo e correção da IA"
+                >
+                    {showCorrectedNames ? (
+                        <><span>👁️</span> Visualizando: Corrigidos</>
+                    ) : (
+                        <><span>✏️</span> Aplicar Correções IA</>
+                    )}
+                </button>
+                <button onClick={() => setShowSuggestionCol(!showSuggestionCol)} className={`px-3 py-2 rounded text-sm border hover:bg-slate-50 dark:hover:bg-slate-700 ${showSuggestionCol ? 'bg-slate-100 dark:bg-slate-700' : 'bg-white dark:bg-slate-800'}`}>
+                    {showSuggestionCol ? 'Ocultar Sugestões' : 'Ver Sugestões IA'}
+                </button>
+                <button onClick={() => setShowFilters(!showFilters)} className="bg-blue-600 text-white px-3 py-2 rounded text-sm hover:bg-blue-700">Filtros Avançados</button>
+                <button onClick={expandAllGroups} className="bg-slate-200 dark:bg-slate-700 px-3 py-2 rounded text-sm hover:bg-slate-300">Expandir Tudo</button>
+                <button onClick={collapseAllGroups} className="bg-slate-200 dark:bg-slate-700 px-3 py-2 rounded text-sm hover:bg-slate-300">Recolher Tudo</button>
             </div>
          </div>
-         {showFilters && <div className="p-4 bg-slate-50 dark:bg-slate-700 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 animate-fadeIn">
-            <div>
-                <label className="block text-xs font-bold text-slate-500 mb-1">Tipo</label>
-                <select value={filterType} onChange={e => setFilterType(e.target.value as any)} className="w-full p-2 rounded border dark:bg-slate-600 dark:text-white dark:border-slate-500"><option value="All">Todos</option><option value="Debit">Débito</option><option value="Credit">Crédito</option></select>
-            </div>
-            <div>
-                <label className="block text-xs font-bold text-slate-500 mb-1">Status Inversão</label>
-                <select value={filterInversion} onChange={e => setFilterInversion(e.target.value as any)} className="w-full p-2 rounded border dark:bg-slate-600 dark:text-white dark:border-slate-500"><option value="all">Todos</option><option value="yes">Com Inversão (⚠️)</option><option value="no">Normal</option></select>
-            </div>
-            <div className="flex gap-2">
-                <div className="flex-1">
-                    <label className="block text-xs font-bold text-slate-500 mb-1">Min</label>
-                    <input type="number" value={filterMinVal} onChange={e => setFilterMinVal(e.target.value)} className="w-full p-2 rounded border dark:bg-slate-600 dark:text-white dark:border-slate-500" placeholder="0.00" />
+         
+         {/* THEME SETTINGS PANEL */}
+         {showThemeSettings && (
+             <div className="p-4 bg-slate-50 dark:bg-slate-800 border-b border-slate-200 dark:border-slate-700 animate-slideDown print:hidden">
+                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                     <div>
+                         <label className="text-xs font-bold text-slate-500 uppercase mb-2 block">Paletas Predefinidas</label>
+                         <div className="flex flex-wrap gap-2">
+                             {DEFAULT_THEMES.map(theme => (
+                                 <button 
+                                     key={theme.name}
+                                     onClick={() => applyTheme(theme)}
+                                     className={`px-3 py-2 rounded text-sm border transition-all ${customTheme.name === theme.name ? 'ring-2 ring-offset-1 ring-blue-500 font-bold' : 'hover:bg-slate-200 dark:hover:bg-slate-700'}`}
+                                     style={{ backgroundColor: theme.headerBg, color: theme.headerText, borderColor: theme.border }}
+                                 >
+                                     {theme.name}
+                                 </button>
+                             ))}
+                         </div>
+                     </div>
+                     <div>
+                         <label className="text-xs font-bold text-slate-500 uppercase mb-2 block">Personalização Fina</label>
+                         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                             <div>
+                                 <span className="text-[10px] text-slate-500 block mb-1">Fundo Cabeçalho</span>
+                                 <input type="color" value={customTheme.headerBg} onChange={e => applyTheme({...customTheme, name: 'Personalizado', headerBg: e.target.value})} className="w-full h-8 cursor-pointer rounded border" />
+                             </div>
+                             <div>
+                                 <span className="text-[10px] text-slate-500 block mb-1">Texto Cabeçalho</span>
+                                 <input type="color" value={customTheme.headerText} onChange={e => applyTheme({...customTheme, name: 'Personalizado', headerText: e.target.value})} className="w-full h-8 cursor-pointer rounded border" />
+                             </div>
+                              <div>
+                                 <span className="text-[10px] text-slate-500 block mb-1">Linha Ímpar</span>
+                                 <input type="color" value={customTheme.rowOddBg} onChange={e => applyTheme({...customTheme, name: 'Personalizado', rowOddBg: e.target.value})} className="w-full h-8 cursor-pointer rounded border" />
+                             </div>
+                             <div>
+                                 <span className="text-[10px] text-slate-500 block mb-1">Linha Par</span>
+                                 <input type="color" value={customTheme.rowEvenBg} onChange={e => applyTheme({...customTheme, name: 'Personalizado', rowEvenBg: e.target.value})} className="w-full h-8 cursor-pointer rounded border" />
+                             </div>
+                         </div>
+                     </div>
+                 </div>
+             </div>
+         )}
+
+         {showFilters && <div className="p-4 bg-slate-50 dark:bg-slate-700 grid grid-cols-1 md:grid-cols-4 gap-4 animate-slideDown print:hidden">
+            <div><label className="text-xs font-bold text-slate-500 uppercase">Tipo</label><select value={filterType} onChange={e => setFilterType(e.target.value as any)} className="w-full p-2 rounded border dark:bg-slate-800 dark:border-slate-600 dark:text-white"><option value="All">Todos</option><option value="Debit">Débito</option><option value="Credit">Crédito</option></select></div>
+            <div><label className="text-xs font-bold text-slate-500 uppercase">Status Inversão</label><select value={filterInversion} onChange={e => setFilterInversion(e.target.value as any)} className="w-full p-2 rounded border dark:bg-slate-800 dark:border-slate-600 dark:text-white"><option value="all">Todos</option><option value="yes">Sim (Anomalia ⚠️)</option><option value="no">Não (Normal)</option></select></div>
+            <div className="flex items-end">
+                <div className="flex items-center space-x-2 border p-2 rounded w-full bg-white dark:bg-slate-800 dark:border-slate-600 h-[42px]">
+                    <input type="checkbox" id="toggleCorrection" checked={showCorrectedNames} onChange={(e) => setShowCorrectedNames(e.target.checked)} className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500 bg-slate-100 border-slate-300" />
+                    <label htmlFor="toggleCorrection" className="text-sm cursor-pointer select-none text-slate-700 dark:text-slate-300">Substituir por Nomes Corrigidos (IA)</label>
                 </div>
-                <div className="flex-1">
-                    <label className="block text-xs font-bold text-slate-500 mb-1">Max</label>
-                    <input type="number" value={filterMaxVal} onChange={e => setFilterMaxVal(e.target.value)} className="w-full p-2 rounded border dark:bg-slate-600 dark:text-white dark:border-slate-500" placeholder="Max" />
+            </div>
+            <div className="flex items-end">
+                <div className="flex items-center space-x-2 border p-2 rounded w-full bg-white dark:bg-slate-800 dark:border-slate-600 h-[42px]">
+                    <input 
+                        type="checkbox" 
+                        id="toggleSuggestionCol" 
+                        checked={showSuggestionCol} 
+                        onChange={(e) => setShowSuggestionCol(e.target.checked)} 
+                        className="w-4 h-4 text-purple-600 rounded focus:ring-purple-500 bg-slate-100 border-slate-300" 
+                    />
+                    <label htmlFor="toggleSuggestionCol" className="text-sm cursor-pointer select-none text-slate-700 dark:text-slate-300">
+                        Exibir Coluna "Sugestão IA"
+                    </label>
                 </div>
-            </div>
-            <div className="flex flex-col justify-end">
-                <label className="flex items-center space-x-2 text-sm dark:text-white cursor-pointer p-2 border rounded hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors dark:border-slate-500">
-                    <input type="checkbox" checked={filterHasCorrection} onChange={e => setFilterHasCorrection(e.target.checked)} className="form-checkbox w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500 dark:focus:ring-blue-600 dark:ring-offset-gray-800 focus:ring-2 dark:bg-gray-700 dark:border-gray-600" /> 
-                    <span>Com Correção IA</span>
-                </label>
-            </div>
-            <div className="col-span-1 md:col-span-2 lg:col-span-4 mt-2">
-                <input type="text" placeholder="Buscar conta ou código..." value={searchTerm} onChange={e => setSearchTerm(e.target.value)} className="w-full p-2 rounded border dark:bg-slate-600 dark:text-white dark:border-slate-500 placeholder-slate-400" />
             </div>
          </div>}
          
-         <div className="overflow-auto max-h-[70vh]">
-          <table className="min-w-full divide-y divide-slate-200 dark:divide-slate-700">
-            <thead className="bg-slate-100 dark:bg-slate-900 sticky top-0 z-20 shadow-md">
+         <div 
+            className="overflow-auto max-h-[70vh] print:max-h-none"
+            style={{
+                '--theme-header-bg': customTheme.headerBg,
+                '--theme-header-text': customTheme.headerText,
+                '--theme-row-odd': customTheme.rowOddBg,
+                '--theme-row-even': customTheme.rowEvenBg,
+                '--theme-border': customTheme.border,
+            } as React.CSSProperties}
+         >
+          <table className="min-w-full divide-y divide-[var(--theme-border)]">
+            <thead className="bg-[var(--theme-header-bg)] sticky top-0 z-20 shadow-md">
               <tr>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase cursor-pointer bg-slate-100 dark:bg-slate-900" onClick={() => requestSort('account_code')}>Código</th>
-                <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 uppercase cursor-pointer bg-slate-100 dark:bg-slate-900" onClick={() => requestSort('account_name')}>Conta</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-slate-500 uppercase cursor-pointer bg-slate-100 dark:bg-slate-900" onClick={() => requestSort('initial_balance')}>Sdo. Anterior</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-slate-500 uppercase cursor-pointer bg-slate-100 dark:bg-slate-900" onClick={() => requestSort('debit_value')}>Débito</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-slate-500 uppercase cursor-pointer bg-slate-100 dark:bg-slate-900" onClick={() => requestSort('credit_value')}>Crédito</th>
-                <th className="px-4 py-3 text-right text-xs font-medium text-slate-500 uppercase cursor-pointer bg-slate-100 dark:bg-slate-900" onClick={() => requestSort('final_balance')}>Sdo. Atual</th>
-                <th className="px-4 py-3 text-center text-xs font-medium text-slate-500 uppercase bg-slate-100 dark:bg-slate-900">Inv.</th>
+                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-left text-xs font-medium uppercase">Código</th>
+                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-left text-xs font-medium uppercase">Conta</th>
+                {showSuggestionCol && <th className="px-4 py-3 text-left text-xs font-medium text-purple-600 uppercase">Sugestão IA</th>}
+                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-right text-xs font-medium uppercase">Sdo. Anterior</th>
+                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-right text-xs font-medium uppercase">Débito</th>
+                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-right text-xs font-medium uppercase">Crédito</th>
+                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-right text-xs font-medium uppercase">Sdo. Atual</th>
+                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-center text-xs font-medium uppercase">Inv.</th>
               </tr>
             </thead>
-            <tbody className="bg-white dark:bg-slate-800 divide-y divide-slate-200 dark:divide-slate-700">
-                  {paginatedAccounts.map((account) => (
-                        <tr key={account.originalIndex} className={`hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors ${account.possible_inversion ? 'bg-amber-50 dark:bg-amber-900/20 border-l-[6px] border-amber-500' : 'border-l-[6px] border-transparent'} ${account.is_synthetic ? 'bg-slate-50 dark:bg-slate-700/50' : ''}`}>
+            <tbody className="divide-y divide-[var(--theme-border)]">
+                  {paginatedAccounts.map((account, index) => {
+                        const suggestion = getSuggestionForAccount(account);
+                        const isOdd = index % 2 !== 0;
+                        const rowStyle = { backgroundColor: isOdd ? 'var(--theme-row-odd)' : 'var(--theme-row-even)' };
+                        
+                        return (
+                        <tr key={account.originalIndex} style={rowStyle} className={`hover:opacity-90 ${account.possible_inversion ? '!bg-yellow-50 dark:!bg-yellow-900/10 border-l-[6px] border-yellow-500' : ''} ${account.is_synthetic ? 'font-bold' : ''}`}>
                           <td className="px-4 py-3 whitespace-nowrap text-sm font-mono text-blue-600 font-bold">
-                             {account.account_code ? (
-                                 account.is_synthetic ? 
-                                 <span>{account.account_code}</span> :
-                                 <a href={`https://www.google.com/search?q=${encodeURIComponent(account.account_code + ' ' + account.account_name + ' contabilidade')}`} target="_blank" rel="noreferrer" className="hover:underline hover:text-blue-800 dark:hover:text-blue-400">{account.account_code} ↗</a>
-                             ) : '-'}
+                             {account.account_code ? <a href={`https://www.google.com/search?q=${encodeURIComponent(account.account_code + ' ' + account.account_name)}`} target="_blank" rel="noreferrer" className="hover:underline">{account.account_code}</a> : '-'}
                           </td>
-                          <td className="px-4 py-3 text-sm dark:text-white relative">
+                          <td className="px-4 py-3 text-sm dark:text-slate-800 relative">
                             <div className="flex items-center" style={{ paddingLeft: `${(account.level - 1) * 16}px` }}>
                                 {account.is_synthetic && (
-                                    <button 
-                                        onClick={() => account.account_code && toggleGroup(account.account_code)}
-                                        className="mr-2 w-4 h-4 flex items-center justify-center border rounded bg-slate-200 text-slate-700 text-xs"
-                                    >
+                                    <button onClick={() => account.account_code && toggleGroup(account.account_code)} className="mr-2 w-4 h-4 flex items-center justify-center border rounded bg-slate-200 text-xs print:hidden">
                                         {account.account_code && expandedGroups.has(account.account_code) ? '-' : '+'}
                                     </button>
                                 )}
-                                <span className={`${account.possible_inversion ? 'underline decoration-red-500 decoration-wavy decoration-2 underline-offset-4' : ''} ${account.is_synthetic ? 'font-bold text-slate-800 dark:text-white' : ''}`}>
+                                <span className={account.possible_inversion ? 'underline decoration-red-500 decoration-wavy' : ''}>
                                     {showCorrectedNames ? getDisplayedName(account) : account.account_name}
                                 </span>
-                            </div>
-                            
-                            {!showCorrectedNames && getDisplayedName(account) !== account.account_name && !account.is_synthetic && (
-                                <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-green-100 text-green-800 relative group cursor-help border border-green-200">
-                                    📝 Sugestão
-                                    <div className="absolute bottom-full left-0 mb-2 w-48 bg-black text-white text-xs rounded p-2 hidden group-hover:block z-50 shadow-lg">
-                                        <div className="font-bold border-b border-gray-600 mb-1 pb-1">Sugestão IA</div>
-                                        <div><span className="text-gray-400">Original:</span> {account.account_name}</div>
-                                        <div><span className="text-green-400">Sugestão:</span> {getDisplayedName(account)}</div>
+                                
+                                {/* GRAPHICAL SUGGESTION INDICATOR */}
+                                {!showCorrectedNames && suggestion && (
+                                    <div className="group relative ml-2 cursor-help print:hidden">
+                                        <span className="text-purple-500 animate-pulse text-lg" title="Sugestão de Correção Disponível">✨</span>
+                                        <div className="absolute left-full top-0 ml-2 w-64 bg-white border border-purple-200 shadow-xl rounded p-3 text-xs z-50 hidden group-hover:block">
+                                            <p className="font-bold text-purple-700 mb-1 border-b pb-1">Sugestão Ortográfica IA:</p>
+                                            <p className="line-through text-slate-400 mb-1">{account.account_name}</p>
+                                            <p className="text-green-600 font-bold text-sm">⬇ {suggestion}</p>
+                                        </div>
                                     </div>
-                                </span>
-                            )}
+                                )}
+                                
+                                {showCorrectedNames && suggestion && (
+                                     <span className="ml-2 text-[10px] bg-purple-100 text-purple-600 px-1 rounded border border-purple-200">Corrigido</span>
+                                )}
+                            </div>
                           </td>
-                          <td className={`px-4 py-3 text-right text-sm text-slate-600 dark:text-slate-300 font-mono ${account.is_synthetic ? 'font-bold' : ''}`}>{formatCurrency(account.initial_balance)}</td>
-                          <td className={`px-4 py-3 text-right text-sm text-blue-700 dark:text-blue-400 font-mono ${account.is_synthetic ? 'font-bold' : ''}`}>{account.debit_value > 0 ? formatCurrency(account.debit_value) : '-'}</td>
-                          <td className={`px-4 py-3 text-right text-sm text-red-700 dark:text-red-400 font-mono ${account.is_synthetic ? 'font-bold' : ''}`}>{account.credit_value > 0 ? formatCurrency(account.credit_value) : '-'}</td>
-                          <td className={`px-4 py-3 text-right text-sm text-slate-800 dark:text-white font-mono bg-slate-50/50 dark:bg-slate-800 ${account.is_synthetic ? 'font-bold' : 'font-bold'}`}>{formatCurrency(account.final_balance)}</td>
-                          <td className="px-4 py-3 text-center">
+                          {showSuggestionCol && <td className="px-4 py-3 text-sm text-green-600 font-medium">{getSuggestionForAccount(account) || '-'}</td>}
+                          <td className="px-4 py-3 text-right text-sm font-mono text-slate-600">{formatCurrency(account.initial_balance)}</td>
+                          <td className="px-4 py-3 text-right text-sm text-blue-700 font-mono">{account.debit_value > 0 ? formatCurrency(account.debit_value) : '-'}</td>
+                          <td className="px-4 py-3 text-right text-sm text-red-700 font-mono">{account.credit_value > 0 ? formatCurrency(account.credit_value) : '-'}</td>
+                          <td className="px-4 py-3 text-right text-sm font-mono text-slate-800">{formatCurrency(account.final_balance)}</td>
+                          <td className={`px-4 py-3 text-center ${account.possible_inversion ? 'bg-yellow-100 rounded' : ''}`}>
                               {account.possible_inversion && !account.is_synthetic && (
-                                  <div className="group relative inline-block cursor-help">
-                                      <span className="text-amber-500 font-bold text-lg">⚠️</span>
-                                      <div className="absolute right-0 top-full mt-2 w-80 bg-white dark:bg-slate-800 border border-amber-200 dark:border-amber-700 shadow-xl rounded-lg p-4 text-left z-50 hidden group-hover:block">
-                                          <div className="flex items-center gap-2 border-b border-amber-100 dark:border-amber-800 pb-2 mb-2">
-                                              <span className="text-xl">🔄</span>
-                                              <h4 className="font-bold text-amber-700 dark:text-amber-500 text-sm uppercase tracking-wide">Inversão de Natureza</h4>
-                                          </div>
-                                          
-                                          <p className="text-xs text-slate-600 dark:text-slate-300 mb-3 leading-relaxed">
-                                              Esta conta apresenta um saldo final contrário à sua natureza contábil padrão. Isso geralmente indica um erro de lançamento ou classificação.
+                                  <div className="group relative inline-block cursor-help print:hidden">
+                                      <span className="text-yellow-600 font-bold text-lg">⚠️</span>
+                                      <div className="absolute right-0 top-full mt-2 w-72 bg-white border-2 border-yellow-400 shadow-xl rounded-lg p-4 text-left z-50 hidden group-hover:block animate-fadeIn">
+                                          <h4 className="font-bold text-yellow-700 text-sm uppercase mb-3 border-b border-yellow-200 pb-2 flex items-center">
+                                             <span className="mr-2 text-xl">⚠️</span> Inversão de Natureza
+                                          </h4>
+                                          <p className="text-xs mb-3 text-slate-700 leading-relaxed font-medium">
+                                             Esta conta está com saldo final contrário ao esperado para seu grupo contábil.
                                           </p>
-                                          
-                                          <div className="space-y-3 mb-3">
-                                              <div className="bg-red-50 dark:bg-red-900/20 p-2.5 rounded border border-red-100 dark:border-red-800/30">
-                                                  <strong className="block text-xs text-red-700 dark:text-red-400 mb-1">⚠️ Ativo com Saldo Credor</strong>
-                                                  <p className="text-[11px] text-slate-600 dark:text-slate-400">
-                                                      Ex: <strong>Caixa/Bancos</strong> negativo. 
-                                                      <br/>Investigar: Pagamentos sem entrada de recursos ou saídas duplicadas.
-                                                  </p>
-                                              </div>
-                                              <div className="bg-blue-50 dark:bg-blue-900/20 p-2.5 rounded border border-blue-100 dark:border-blue-800/30">
-                                                  <strong className="block text-xs text-blue-700 dark:text-blue-400 mb-1">⚠️ Passivo com Saldo Devedor</strong>
-                                                  <p className="text-[11px] text-slate-600 dark:text-slate-400">
-                                                      Ex: <strong>Fornecedores</strong> positivo.
-                                                      <br/>Investigar: Pagamentos antecipados não baixados ou classificação em conta errada.
-                                                  </p>
-                                              </div>
+                                          <div className="bg-yellow-50 p-3 rounded border border-yellow-200 mb-3">
+                                              <p className="text-[10px] font-extrabold text-yellow-800 mb-2 uppercase tracking-wide">Exemplos Concretos:</p>
+                                              <ul className="space-y-2">
+                                                  <li className="text-xs text-slate-800 flex items-start">
+                                                      <span className="text-red-500 mr-1">❌</span>
+                                                      <span><strong>Caixa/Bancos (Ativo)</strong><br/><span className="text-[10px] opacity-80">Virou CREDOR (Negativo/Estourado)</span></span>
+                                                  </li>
+                                                  <li className="text-xs text-slate-800 flex items-start">
+                                                      <span className="text-red-500 mr-1">❌</span>
+                                                      <span><strong>Fornecedores (Passivo)</strong><br/><span className="text-[10px] opacity-80">Virou DEVEDOR (Adiantamento?)</span></span>
+                                                  </li>
+                                              </ul>
                                           </div>
-                                          
-                                          <div className="pt-2 border-t border-slate-100 dark:border-slate-700 text-[10px] text-slate-400 italic flex gap-1">
-                                              <span>💡</span>
-                                              <span>Dica: Contas redutoras (ex: Depreciação) são exceções naturais.</span>
-                                          </div>
+                                          <p className="text-xs text-blue-600 font-bold border-t pt-2 border-slate-100">
+                                              👉 Ação: Verifique erros de classificação ou lançamentos manuais invertidos.
+                                          </p>
                                       </div>
                                   </div>
                               )}
                           </td>
                         </tr>
-                  ))}
+                  )})}
             </tbody>
           </table>
          </div>

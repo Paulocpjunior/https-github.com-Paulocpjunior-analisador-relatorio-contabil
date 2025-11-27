@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { HistoryItem } from '../types';
 
 interface Props {
@@ -7,10 +7,20 @@ interface Props {
   history: HistoryItem[];
   onSelect: (item: HistoryItem) => void;
   onClear: () => void;
+  currentUser?: string;
 }
 
-const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, onClear }) => {
+const ITEMS_PER_PAGE = 10;
+
+const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, onClear, currentUser }) => {
   const [searchTerm, setSearchTerm] = useState('');
+  const [viewMode, setViewMode] = useState<'all' | 'mine'>('all');
+  const [itemsToShow, setItemsToShow] = useState(ITEMS_PER_PAGE);
+
+  // Reset pagination when filter or modal state changes
+  useEffect(() => {
+    setItemsToShow(ITEMS_PER_PAGE);
+  }, [isOpen, searchTerm, viewMode]);
 
   const formatDate = (isoString: string) => {
     return new Date(isoString).toLocaleString('pt-BR', {
@@ -23,18 +33,34 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
   };
   
   const filteredHistory = useMemo(() => {
+    let data = history;
+
+    if (viewMode === 'mine' && currentUser) {
+        data = data.filter(item => 
+            item.headerData.collaboratorName && 
+            item.headerData.collaboratorName.toLowerCase().trim() === currentUser.toLowerCase().trim()
+        );
+    }
+
     if (!searchTerm.trim()) {
-      return history;
+      return data;
     }
     const lowercasedFilter = searchTerm.toLowerCase();
-    return history.filter(item =>
+    return data.filter(item =>
       (item.headerData.collaboratorName && item.headerData.collaboratorName.toLowerCase().includes(lowercasedFilter)) ||
       (item.headerData.companyName && item.headerData.companyName.toLowerCase().includes(lowercasedFilter)) ||
       (item.fileName && item.fileName.toLowerCase().includes(lowercasedFilter)) ||
       formatDate(item.timestamp).includes(lowercasedFilter)
     );
-  }, [history, searchTerm]);
+  }, [history, searchTerm, viewMode, currentUser]);
 
+  const displayedItems = useMemo(() => {
+    return filteredHistory.slice(0, itemsToShow);
+  }, [filteredHistory, itemsToShow]);
+
+  const handleLoadMore = () => {
+    setItemsToShow(prev => prev + ITEMS_PER_PAGE);
+  };
 
   return (
     <div className={`fixed inset-0 z-50 overflow-hidden transition-all duration-300 ${isOpen ? 'pointer-events-auto' : 'pointer-events-none'}`}>
@@ -61,22 +87,52 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
           </button>
         </div>
         
-        {/* Search Bar */}
-        <div className="p-4 bg-slate-100 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700">
-          <div className="relative">
-            <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 text-slate-400">
-                <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
-              </svg>
+        {/* FILTERS */}
+        <div className="px-4 pt-4 bg-slate-50 dark:bg-slate-800/50">
+            <div className="flex bg-slate-200 dark:bg-slate-700 rounded-lg p-1 mb-3">
+                <button 
+                    onClick={() => setViewMode('all')} 
+                    className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${
+                        viewMode === 'all' 
+                        ? 'bg-white dark:bg-slate-600 text-blue-600 dark:text-blue-300 shadow-sm' 
+                        : 'text-slate-500 dark:text-slate-400 hover:text-slate-700'
+                    }`}
+                >
+                    Todas Análises
+                </button>
+                <button 
+                    onClick={() => setViewMode('mine')} 
+                    disabled={!currentUser}
+                    title={!currentUser ? "Defina um colaborador na tela inicial" : ""}
+                    className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${
+                        viewMode === 'mine' 
+                        ? 'bg-white dark:bg-slate-600 text-blue-600 dark:text-blue-300 shadow-sm' 
+                        : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed'
+                    }`}
+                >
+                    Meus Relatórios {currentUser ? `(${currentUser.split(' ')[0]})` : ''}
+                </button>
             </div>
-            <input
-              type="text"
-              placeholder="Filtrar por colaborador, empresa..."
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-10 pr-4 py-2 border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white rounded-lg text-sm focus:ring-2 focus:ring-accent focus:border-accent"
-            />
-          </div>
+            
+            <div className="relative mb-2">
+                <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4 text-slate-400">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
+                </svg>
+                </div>
+                <input
+                type="text"
+                placeholder="Filtrar por nome, empresa ou data..."
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                className="w-full pl-9 pr-4 py-2 border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+            </div>
+            <div className="text-right pb-2">
+                <span className="text-[10px] text-slate-400">
+                    Exibindo {displayedItems.length} de {filteredHistory.length}
+                </span>
+            </div>
         </div>
 
         {/* Content */}
@@ -93,12 +149,13 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-16 h-16 mx-auto mb-4 opacity-30">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M21 21l-5.197-5.197m0 0A7.5 7.5 0 105.196 5.196a7.5 7.5 0 0010.607 10.607z" />
                 </svg>
-                <p>Nenhum resultado encontrado para <span className="font-semibold text-slate-600 dark:text-slate-300">"{searchTerm}"</span>.</p>
+                <p>Nenhum resultado encontrado.</p>
+                {viewMode === 'mine' && <p className="text-xs mt-2 text-slate-400">Você está filtrando apenas por "{currentUser}".</p>}
             </div>
           ) : (
-            <ul className="space-y-3">
-              {filteredHistory.map((item) => (
-                <li 
+            <div className="space-y-3">
+              {displayedItems.map((item) => (
+                <div 
                   key={item.id}
                   onClick={() => { onSelect(item); onClose(); }}
                   className="bg-white dark:bg-slate-700 p-4 rounded-lg border border-slate-200 dark:border-slate-600 shadow-sm hover:border-blue-400 dark:hover:border-blue-400 hover:shadow-md cursor-pointer transition-all group"
@@ -154,9 +211,18 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
                         )}
                      </div>
                   </div>
-                </li>
+                </div>
               ))}
-            </ul>
+              
+              {filteredHistory.length > itemsToShow && (
+                  <button 
+                    onClick={handleLoadMore}
+                    className="w-full py-2 bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded font-medium text-sm hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors"
+                  >
+                    Carregar mais... ({filteredHistory.length - itemsToShow} restantes)
+                  </button>
+              )}
+            </div>
           )}
         </div>
 
