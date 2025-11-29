@@ -3,6 +3,7 @@ import { AnalysisResult, ExtractedAccount, HeaderData } from '../types';
 import { generateFinancialInsight, generateCMVAnalysis } from '../services/geminiService';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 interface Props {
   result: AnalysisResult;
@@ -29,6 +30,7 @@ const DEFAULT_THEMES: TableTheme[] = [
 
 const TABLE_THEME_KEY = 'auditAI_table_theme';
 const DEFAULT_EBITDA_MULTIPLE_KEY = 'auditAI_default_ebitda_multiple';
+const CHART_COLORS = ['#2563eb', '#16a34a', '#d97706', '#dc2626', '#7c3aed'];
 
 const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
   const [sortConfig, setSortConfig] = useState<{ key: SortKey; direction: 'asc' | 'desc' } | null>(null);
@@ -71,6 +73,7 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
   }, [result]);
 
   const [isValuationExpanded, setIsValuationExpanded] = useState(false);
+  const [isChartExpanded, setIsChartExpanded] = useState(true);
   const [isInversionExpanded, setIsInversionExpanded] = useState(true);
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(100);
@@ -137,6 +140,47 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
 
   const invertedAccounts = useMemo(() => {
       return accounts.filter(a => a.possible_inversion && !a.is_synthetic);
+  }, [accounts]);
+
+  // --- CHART DATA PREPARATION ---
+  const chartData = useMemo(() => {
+      if (!accounts || accounts.length === 0) return null;
+
+      // Filter analytical accounts only
+      const analytical = accounts.filter(a => !a.is_synthetic);
+      
+      // Sort by magnitude of final balance to get the "Top 5" most significant accounts
+      const topAccounts = analytical
+          .sort((a, b) => Math.abs(b.final_balance) - Math.abs(a.final_balance))
+          .slice(0, 5);
+
+      if (topAccounts.length === 0) return null;
+
+      // Structure data for Recharts: [{ name: 'Inicial', Account1: 100, Account2: 50 }, { name: 'Final', Account1: 120, ... }]
+      const startPoint: any = { name: 'Saldo Inicial' };
+      const endPoint: any = { name: 'Saldo Final' };
+      
+      const lines: { key: string, name: string, color: string }[] = [];
+
+      topAccounts.forEach((acc, index) => {
+          // Use a sanitized key
+          const key = `acc_${index}`;
+          const displayName = acc.account_name.length > 20 ? acc.account_name.substring(0, 20) + '...' : acc.account_name;
+          
+          startPoint[key] = acc.initial_balance;
+          endPoint[key] = acc.final_balance;
+          
+          lines.push({
+              key,
+              name: displayName,
+              color: CHART_COLORS[index % CHART_COLORS.length]
+          });
+      });
+
+      return {
+          data: [startPoint, endPoint],
+          lines
+      };
   }, [accounts]);
 
   const finalResultValue = useMemo(() => {
@@ -513,6 +557,57 @@ Status: ${summary.is_balanced ? 'Balanceado' : 'Desbalanceado'}
             </div>
          </div>
       </div>
+
+       {/* CHART SECTION */}
+       {chartData && (
+          <div id="chart" className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden print:hidden">
+            <div className="px-6 py-4 bg-slate-100 dark:bg-slate-900 border-b dark:border-slate-700 flex justify-between items-center">
+                <h3 className="text-lg font-semibold dark:text-white flex items-center gap-2">
+                    <span>📈</span> Evolução das Principais Contas
+                </h3>
+                <button onClick={() => setIsChartExpanded(!isChartExpanded)} className="text-slate-500 hover:text-slate-700 dark:text-slate-400 font-mono text-xl">
+                    {isChartExpanded ? '▼' : '▶'}
+                </button>
+            </div>
+            {isChartExpanded && (
+                <div className="p-6 h-[400px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                        <LineChart data={chartData.data} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                            <XAxis 
+                                dataKey="name" 
+                                stroke="#64748b" 
+                                tick={{ fill: '#64748b', fontSize: 12 }}
+                            />
+                            <YAxis 
+                                stroke="#64748b"
+                                tick={{ fill: '#64748b', fontSize: 12 }}
+                                tickFormatter={(value) => new Intl.NumberFormat('pt-BR', { notation: "compact", compactDisplay: "short" }).format(value)} 
+                            />
+                            <Tooltip 
+                                formatter={(value: number) => formatCurrency(value)}
+                                contentStyle={{ backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                            />
+                            <Legend wrapperStyle={{ paddingTop: '20px' }} />
+                            {chartData.lines.map((line) => (
+                                <Line 
+                                    key={line.key}
+                                    type="monotone" 
+                                    dataKey={line.key} 
+                                    name={line.name}
+                                    stroke={line.color} 
+                                    strokeWidth={3}
+                                    activeDot={{ r: 6 }}
+                                    dot={{ r: 4 }}
+                                />
+                            ))}
+                        </LineChart>
+                    </ResponsiveContainer>
+                    <p className="text-center text-xs text-slate-400 mt-2 italic">Exibindo as 5 contas analíticas com maior movimentação ou saldo final.</p>
+                </div>
+            )}
+          </div>
+       )}
 
       {/* NEW FINANCIAL TOOLS SECTION (SEPARATED) */}
       <div id="valuation" className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden print:hidden">
