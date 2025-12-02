@@ -1,5 +1,5 @@
 import { GoogleGenAI, GenerateContentResponse, HarmCategory, HarmBlockThreshold, Chat } from "@google/genai";
-import { AnalysisResult, ExtractedAccount } from "../types";
+import { AnalysisResult, ExtractedAccount, ComparisonRow } from "../types";
 
 // Helper for Exponential Backoff
 async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, baseDelay = 3000): Promise<T> {
@@ -554,6 +554,32 @@ export const generateSpedComplianceCheck = async (analysisData: AnalysisResult):
         config: { systemInstruction: systemInstruction, temperature: 0.2 }
     }));
     return response.text || "Análise de conformidade não gerada.";
+};
+
+export const generateComparisonAnalysis = async (rows: ComparisonRow[], period1: string, period2: string): Promise<string> => {
+    if (!process.env.API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    
+    const significantChanges = rows
+        .filter(r => !r.is_synthetic && Math.abs(r.varPct) > 10 && Math.abs(r.val2) > 1000)
+        .sort((a, b) => Math.abs(b.varAbs) - Math.abs(a.varAbs))
+        .slice(0, 20)
+        .map(r => `- ${r.code} ${r.name}: ${period1}=${r.val1}, ${period2}=${r.val2} (Var: ${r.varAbs.toFixed(2)}, ${r.varPct.toFixed(2)}%)`)
+        .join('\n');
+
+    const systemInstruction = `
+    ATUE COMO: Analista Financeiro Sênior (FP&A).
+    TAREFA: Realizar Análise Horizontal (Comparativo de Períodos).
+    CONTEXTO: Comparação entre ${period1} e ${period2}.
+    OBJETIVO: Explicar as variações mais significativas e apontar tendências ou anomalias.
+    `;
+
+    const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+        model: 'gemini-3-pro-preview',
+        contents: { parts: [{ text: `Analise estas variações contábeis significativas:\n\n${significantChanges}` }] },
+        config: { systemInstruction: systemInstruction, temperature: 0.4 }
+    }));
+    return response.text || "Sem insights gerados.";
 };
 
 export const chatWithFinancialAgent = async (history: {role: 'user' | 'model', parts: {text: string}[]}[], message: string) => {

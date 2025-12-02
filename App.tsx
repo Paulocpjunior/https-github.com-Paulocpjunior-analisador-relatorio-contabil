@@ -4,7 +4,8 @@ import FileUploader from './components/FileUploader';
 import AnalysisViewer from './components/AnalysisViewer';
 import AnalysisHistory from './components/AnalysisHistory';
 import ChatAssistant from './components/ChatAssistant';
-import { HeaderData, AnalysisResult, HistoryItem } from './types';
+import ComparisonViewer from './components/ComparisonViewer';
+import { HeaderData, AnalysisResult, HistoryItem, ComparisonResult, ComparisonRow } from './types';
 import { analyzeDocument } from './services/geminiService';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -12,7 +13,7 @@ import autoTable from 'jspdf-autotable';
 const HISTORY_STORAGE_KEY = 'auditAI_history';
 const CACHE_STORAGE_PREFIX = 'auditAI_cache_';
 const THEME_STORAGE_KEY = 'auditAI_theme';
-const MAX_HISTORY_ITEMS = 100; // Increased to allow lazy loading demonstration
+const MAX_HISTORY_ITEMS = 100;
 
 const LoadingSpinner = () => (
   <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm flex flex-col items-center justify-center z-50 animate-fadeIn">
@@ -37,6 +38,9 @@ const App: React.FC = () => {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [isHistoryOpen, setIsHistoryOpen] = useState(false);
   const [darkMode, setDarkMode] = useState(false);
+  
+  // COMPARISON STATE
+  const [comparisonResult, setComparisonResult] = useState<ComparisonResult | null>(null);
 
   useEffect(() => {
     const savedHistory = localStorage.getItem(HISTORY_STORAGE_KEY);
@@ -64,19 +68,77 @@ const App: React.FC = () => {
     localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updated));
   };
 
-  const loadFromHistory = (item: HistoryItem) => {
+  const getFullResult = (item: HistoryItem): AnalysisResult | null => {
       let fullResult = item.fullResult;
       if (!fullResult) {
           const cached = localStorage.getItem(`${CACHE_STORAGE_PREFIX}${item.id}`);
           if (cached) fullResult = JSON.parse(cached);
       }
+      return fullResult || null;
+  };
+
+  const loadFromHistory = (item: HistoryItem) => {
+      const fullResult = getFullResult(item);
       if (fullResult) {
           setHeaderData(item.headerData);
           setAnalysisResult(fullResult);
           setAnalysisTimestamp(item.timestamp);
           setSelectedFile({ file: { name: item.fileName } as File, base64: '', mimeType: '' });
           setError(null);
+          setComparisonResult(null); // Clear comparison if loading single item
       } else { alert("Detalhes não encontrados no cache."); }
+  };
+
+  const handleComparison = (item1: HistoryItem, item2: HistoryItem) => {
+      const res1 = getFullResult(item1);
+      const res2 = getFullResult(item2);
+
+      if (!res1 || !res2) {
+          alert("Erro: Dados completos não encontrados para comparação.");
+          return;
+      }
+
+      // Logic to merge accounts
+      const rows: ComparisonRow[] = [];
+      const map1 = new Map(res1.accounts.map(a => [a.account_code || a.account_name, a]));
+      const map2 = new Map(res2.accounts.map(a => [a.account_code || a.account_name, a]));
+
+      // Merge unique keys
+      const allKeys = new Set([...map1.keys(), ...map2.keys()]);
+
+      allKeys.forEach(key => {
+          const acc1 = map1.get(key);
+          const acc2 = map2.get(key);
+          const name = acc2?.account_name || acc1?.account_name || 'Desconhecido';
+          const code = acc2?.account_code || acc1?.account_code || '';
+          const val1 = acc1 ? acc1.final_balance : 0;
+          const val2 = acc2 ? acc2.final_balance : 0;
+          
+          const varAbs = val2 - val1;
+          const varPct = val1 !== 0 ? (varAbs / Math.abs(val1)) * 100 : (val2 !== 0 ? 100 : 0);
+
+          rows.push({
+              code,
+              name,
+              val1,
+              val2,
+              varAbs,
+              varPct,
+              is_synthetic: (acc1?.is_synthetic || acc2?.is_synthetic) || false,
+              level: acc1?.level || acc2?.level || 1
+          });
+      });
+
+      // Sort by code/name
+      rows.sort((a, b) => a.code.localeCompare(b.code));
+
+      setComparisonResult({
+          period1Label: new Date(item1.timestamp).toLocaleDateString(),
+          period2Label: new Date(item2.timestamp).toLocaleDateString(),
+          rows,
+          documentType: item1.summary.document_type
+      });
+      setAnalysisResult(null); // Switch view
   };
 
   const handleStartAnalysis = async () => {
@@ -84,11 +146,11 @@ const App: React.FC = () => {
     if (!selectedFile?.base64) { setError("Selecione um arquivo."); return; }
     setIsLoading(true); setError(null);
     try {
-      // Use the explicitly processed mimeType (e.g., text/csv from Excel) or fallback to file.type
       const mime = selectedFile.mimeType || selectedFile.file.type;
       const result = await analyzeDocument(selectedFile.base64, mime);
       setAnalysisTimestamp(new Date().toISOString());
       setAnalysisResult(result);
+      setComparisonResult(null);
       saveToHistory(result, headerData, selectedFile.file.name);
     } catch (err: any) {
       console.error(err);
@@ -96,9 +158,8 @@ const App: React.FC = () => {
     } finally { setIsLoading(false); }
   };
 
-  const handleReset = () => { setAnalysisResult(null); setSelectedFile(null); setError(null); };
+  const handleReset = () => { setAnalysisResult(null); setComparisonResult(null); setSelectedFile(null); setError(null); };
 
-  // STRICT check: Must have base64 data to be considered ready
   const isReady = !isLoading && selectedFile !== null && selectedFile.base64.length > 0;
 
   return (
@@ -109,7 +170,8 @@ const App: React.FC = () => {
         history={history} 
         onSelect={loadFromHistory} 
         onClear={() => setHistory([])}
-        currentUser={headerData.collaboratorName} // Passing user context for filtering
+        onCompare={handleComparison}
+        currentUser={headerData.collaboratorName} 
       />
       
       <header className="bg-blue-600 dark:bg-blue-900 text-white py-4 shadow-md sticky top-0 z-10">
@@ -123,14 +185,15 @@ const App: React.FC = () => {
             <div className="flex gap-2">
                 <button onClick={toggleTheme} className="p-2 hover:bg-white/10 rounded-full">{darkMode ? '☀' : '🌙'}</button>
                 <button onClick={() => setIsHistoryOpen(true)} className="p-2 hover:bg-white/10 rounded-full">Histórico</button>
-                {analysisResult && <button onClick={handleReset} className="bg-white/20 px-3 py-1 rounded text-sm hover:bg-white/30">Nova</button>}
+                {(analysisResult || comparisonResult) && <button onClick={handleReset} className="bg-white/20 px-3 py-1 rounded text-sm hover:bg-white/30">Nova</button>}
             </div>
          </div>
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-8">
         {isLoading && <LoadingSpinner />}
-        {!analysisResult && (
+        
+        {!analysisResult && !comparisonResult && (
            <div className={isLoading ? 'opacity-50 blur-sm pointer-events-none' : ''}>
               <HeaderInputs data={headerData} onChange={setHeaderData} disabled={isLoading} />
               <div className="bg-white dark:bg-slate-800 p-6 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700">
@@ -155,14 +218,20 @@ const App: React.FC = () => {
               </div>
            </div>
         )}
-        {analysisResult && !isLoading && (
+
+        {analysisResult && !isLoading && !comparisonResult && (
             <div className="animate-fadeIn">
                 <AnalysisViewer result={analysisResult} headerData={headerData} />
             </div>
         )}
+
+        {comparisonResult && !isLoading && (
+            <div className="animate-fadeIn">
+                <ComparisonViewer data={comparisonResult} onBack={() => { setComparisonResult(null); }} />
+            </div>
+        )}
       </main>
       
-      {/* Floating Chat Bot */}
       <ChatAssistant />
     </div>
   );

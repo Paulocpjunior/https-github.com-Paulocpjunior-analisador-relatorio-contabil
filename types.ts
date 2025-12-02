@@ -52,3 +52,22 @@ export interface HistoryItem {
   summary: AnalysisSummary;
   fullResult?: AnalysisResult; // Optional to allow optimizing localStorage usage
 }
+
+// --- COMPARISON TYPES ---
+export interface ComparisonRow {
+  code: string;
+  name: string;
+  val1: number; // Older period
+  val2: number; // Newer period
+  varAbs: number;
+  varPct: number;
+  is_synthetic: boolean;
+  level: number;
+}
+
+export interface ComparisonResult {
+  period1Label: string;
+  period2Label: string;
+  rows: ComparisonRow[];
+  documentType: string;
+}
