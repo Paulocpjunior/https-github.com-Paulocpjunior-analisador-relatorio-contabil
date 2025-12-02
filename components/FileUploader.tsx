@@ -21,10 +21,10 @@ const FileUploader: React.FC<Props> = ({ onFileSelected, isLoading, selectedFile
   }, [isLoading, isReading]);
 
   const processFile = useCallback((file: File) => {
-    const validTypes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel', 'text/csv'];
+    const validTypes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel', 'text/csv', 'text/plain'];
     // Allow basic checking, but rely on extension as well for safety
-    if (!validTypes.includes(file.type) && !file.name.endsWith('.xlsx') && !file.name.endsWith('.xls') && !file.name.endsWith('.pdf')) {
-        alert("Formato inválido. Use PDF ou Excel.");
+    if (!validTypes.includes(file.type) && !file.name.endsWith('.xlsx') && !file.name.endsWith('.xls') && !file.name.endsWith('.pdf') && !file.name.endsWith('.txt')) {
+        alert("Formato inválido. Use PDF, Excel ou TXT (SPED).");
         return;
     }
 
@@ -32,6 +32,7 @@ const FileUploader: React.FC<Props> = ({ onFileSelected, isLoading, selectedFile
     setUploadProgress(0);
 
     const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
+    const isText = file.type === 'text/plain' || file.name.endsWith('.txt') || file.name.endsWith('.csv');
 
     if (isExcel) {
         // EXCEL STRATEGY: Parse to CSV locally
@@ -62,6 +63,29 @@ const FileUploader: React.FC<Props> = ({ onFileSelected, isLoading, selectedFile
         };
         reader.readAsArrayBuffer(file);
 
+    } else if (isText) {
+        // TXT/SPED STRATEGY: Read as Text, then Base64
+        const reader = new FileReader();
+        reader.onprogress = (data) => {
+            if (data.lengthComputable) setUploadProgress(Math.round((data.loaded / data.total) * 100));
+        };
+        reader.onload = (e) => {
+            try {
+                const textContent = e.target!.result as string;
+                // Encode to Base64 (UTF-8 safe)
+                const base64 = btoa(unescape(encodeURIComponent(textContent)));
+                
+                setTimeout(() => {
+                    onFileSelected(file, base64, 'text/plain');
+                    setIsReading(false);
+                }, 500);
+            } catch (err) {
+                console.error("Text Parse Error", err);
+                alert("Erro ao ler arquivo de texto/SPED.");
+                setIsReading(false);
+            }
+        };
+        reader.readAsText(file); // Default UTF-8
     } else {
         // PDF STRATEGY: Base64
         const reader = new FileReader();
@@ -133,7 +157,7 @@ const FileUploader: React.FC<Props> = ({ onFileSelected, isLoading, selectedFile
              <div className="animate-scaleIn flex flex-col items-center">
                <div className="bg-green-100 p-4 rounded-full mb-3 relative shadow-sm">
                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-10 h-10 text-green-600 relative z-10">
-                        <path fillRule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75 9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm13.36-1.814a.75.75 0 10-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.14-.094l3.75-5.25z" clipRule="evenodd" />
+                        <path fillRule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75-9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm13.36-1.814a.75.75 0 10-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.14-.094l3.75-5.25z" clipRule="evenodd" />
                     </svg>
                </div>
                <h3 className="text-lg font-bold text-green-800 mb-1">Upload Completo!</h3>
@@ -155,11 +179,11 @@ const FileUploader: React.FC<Props> = ({ onFileSelected, isLoading, selectedFile
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-12 h-12"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" /></svg>
               </div>
               <p className="mb-2 text-xl text-slate-700 font-semibold"><span className="text-blue-600 hover:underline">Clique para carregar</span> ou arraste</p>
-              <p className="text-sm text-slate-500">Suporta PDF e Excel (Tamanho ilimitado)</p>
+              <p className="text-sm text-slate-500">Suporta PDF, Excel e TXT (SPED/ECD/ECF)</p>
             </>
           )}
         </div>
-        <input id="file-upload" type="file" className="hidden" accept=".pdf, .xlsx, .xls" onChange={handleChange} disabled={isLocked} />
+        <input id="file-upload" type="file" className="hidden" accept=".pdf, .xlsx, .xls, .txt, .csv" onChange={handleChange} disabled={isLocked} />
       </label>
     </div>
   );

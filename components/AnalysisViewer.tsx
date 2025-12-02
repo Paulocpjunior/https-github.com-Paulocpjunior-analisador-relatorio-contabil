@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { AnalysisResult, ExtractedAccount, HeaderData } from '../types';
-import { generateFinancialInsight, generateCMVAnalysis } from '../services/geminiService';
+import { generateFinancialInsight, generateCMVAnalysis, generateSpedComplianceCheck } from '../services/geminiService';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
@@ -97,9 +97,11 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
   
   const [ebitdaResult, setEbitdaResult] = useState<string>('');
   const [cmvResult, setCmvResult] = useState<string>('');
+  const [spedResult, setSpedResult] = useState<string>('');
   
   const [isEbitdaLoading, setIsEbitdaLoading] = useState(false);
   const [isCmvLoading, setIsCmvLoading] = useState(false);
+  const [isSpedLoading, setIsSpedLoading] = useState(false);
 
   const formatCurrency = (value: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
 
@@ -128,6 +130,20 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
           console.error(e);
       } finally {
           setIsCmvLoading(false);
+      }
+  };
+
+  const handleGenerateSPED = async () => {
+      if (!result) return;
+      setIsSpedLoading(true);
+      try {
+          const text = await generateSpedComplianceCheck(result);
+          setSpedResult(text);
+      } catch (e) {
+          setSpedResult("Erro ao analisar conformidade SPED.");
+          console.error(e);
+      } finally {
+          setIsSpedLoading(false);
       }
   };
 
@@ -704,6 +720,47 @@ Status: ${summary.is_balanced ? 'Balanceado' : 'Desbalanceado'}
                             ) : (
                                 <div className="h-full flex flex-col items-center justify-center text-slate-400">
                                     <p className="text-sm">Clique em Analisar para iniciar a auditoria de custos.</p>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+
+                {/* TOOL 3: Auditoria SPED (ECD/ECF) - NOVO */}
+                <div className="border border-slate-200 dark:border-slate-700 rounded-lg p-5">
+                    <h4 className="font-bold text-orange-800 dark:text-orange-400 mb-4 flex items-center gap-2">
+                        <span className="text-xl">📋</span> Auditoria de Obrigações Acessórias (SPED ECD/ECF)
+                    </h4>
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                        <div className="lg:col-span-1 space-y-4">
+                            <p className="text-xs text-slate-600 dark:text-slate-400 leading-relaxed">
+                                Verificação automática de conformidade com o Manual de Orientação do Leiaute da ECD (Escrituração Contábil Digital) e ECF.
+                                <br/><br/>
+                                Analisa:
+                                <br/>• Inversões de natureza (Erro PVA)
+                                <br/>• Estrutura de Plano de Contas
+                                <br/>• Consistência BP vs DRE
+                            </p>
+                             <button 
+                                onClick={handleGenerateSPED}
+                                disabled={isSpedLoading}
+                                className="w-full py-2 bg-orange-600 text-white rounded font-bold hover:bg-orange-700 disabled:opacity-50 transition-colors text-sm flex items-center justify-center gap-2"
+                            >
+                                {isSpedLoading ? 'Auditando...' : <><span>🛡️</span> Auditar SPED</>}
+                            </button>
+                        </div>
+                        <div className="lg:col-span-2 bg-slate-50 dark:bg-slate-900/50 p-4 rounded border border-slate-200 dark:border-slate-700 min-h-[150px]">
+                             {spedResult ? (
+                                <div className="prose dark:prose-invert max-w-none text-sm">
+                                    <div className="flex justify-between items-center mb-4 border-b pb-2 border-slate-200 dark:border-slate-700">
+                                        <span className="font-bold text-orange-700 dark:text-orange-500">Relatório de Pré-Validação SPED</span>
+                                        <button onClick={() => exportPDFContent('Auditoria Prévia SPED ECD/ECF', spedResult)} className="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded border border-orange-200 hover:bg-orange-200">📄 PDF</button>
+                                    </div>
+                                    <pre className="whitespace-pre-wrap font-sans text-slate-700 dark:text-slate-300">{spedResult}</pre>
+                                </div>
+                            ) : (
+                                <div className="h-full flex flex-col items-center justify-center text-slate-400">
+                                    <p className="text-sm">Inicie a auditoria para verificar a consistência com o layout oficial.</p>
                                 </div>
                             )}
                         </div>

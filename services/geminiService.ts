@@ -325,7 +325,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
         { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
     ];
 
-    const promptText = `
+    let promptText = `
     ROLE: OCR/Data Extractor.
     TASK: Convert financial tables to structured TEXT lines.
     
@@ -350,9 +350,24 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
         // OPTIMIZATION: Handle Text/CSV as direct text to avoid 'inlineData' parsing issues with some models
         if (mimeType === 'text/csv' || mimeType === 'text/plain' || mimeType === 'application/csv') {
             const decodedText = safeDecodeBase64(fileBase64);
+            
+            // Check for SPED signature (lines starting with |)
+            const isSped = decodedText.includes('|I050|') || decodedText.includes('|J100|') || decodedText.includes('|0000|');
+            
+            if (isSped) {
+                promptText = `
+                ROLE: SPED Parser.
+                TASK: Extract relevant financial registers (I050, J100, etc) from SPED content.
+                RULES:
+                1. Focus on Account Plan (I050) and Balances/DRE.
+                2. Return readable lines: Code | Name | Type | Balance.
+                3. Keep the layout logic if possible.
+                `;
+            }
+
             contents = { parts: [
                 { text: promptText },
-                { text: `\n\n--- INPUT DOCUMENT CONTENT (${mimeType}) ---\n${decodedText}\n--- END INPUT ---` }
+                { text: `\n\n--- INPUT DOCUMENT CONTENT (${mimeType}) ---\n${decodedText.substring(0, 100000)}\n--- END INPUT ---` } // Truncate very large texts if needed, though tokens are generous
             ]};
         } else {
             // Binary formats (PDF, Image) use inlineData
@@ -509,6 +524,36 @@ export const generateCMVAnalysis = async (analysisData: AnalysisResult, accounti
       config: { systemInstruction: `Auditor de Custos (CMV). Norma: ${accountingStandard}.`, temperature: 0.3 }
     }));
     return response.text || "Sem resposta.";
+};
+
+export const generateSpedComplianceCheck = async (analysisData: AnalysisResult): Promise<string> => {
+    if (!process.env.API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const accounts = (analysisData.accounts || [])
+        .slice(0, 250) // Limit to avoid context overflow, focusing on main accounts
+        .map(a => `${a.account_code || '?'} | ${a.account_name} | ${a.final_balance} (${a.type})`)
+        .join('\n');
+
+    const systemInstruction = `
+    ATUE COMO: Especialista em SPED Contábil (ECD) e ECF.
+    TAREFA: Analisar a lista de contas extraída e identificar potenciais problemas para validação no PVA (Programa Validador e Assinador).
+    
+    REGRAS DE ANÁLISE:
+    1. **Estrutura de Contas:** Verifique se as contas analíticas/sintéticas parecem lógicas.
+    2. **Natureza Invertida:** Aponte contas do Ativo/Despesa com saldo Credor ou Passivo/Receita com saldo Devedor (Erro grave no SPED).
+    3. **Plano Referencial (Mapping):** Como os dados extraídos podem não ter o código referencial (I051), alerte sobre a necessidade de mapeamento para o plano do Banco Central/Receita Federal se houver contas ambíguas.
+    4. **Bloco J vs I:** Verifique consistência lógica entre Balanço Patrimonial (J100) e DRE (J150).
+    5. **Obrigações Acessórias:** Cite quais registros (ex: I050, I155, J100) seriam impactados por eventuais erros encontrados.
+
+    FORMATO DE RESPOSTA: Markdown profissional, listando inconsistências e sugestões de correção.
+    `;
+
+    const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+        model: 'gemini-3-pro-preview',
+        contents: { parts: [{ text: `Realize uma auditoria prévia para ECD/ECF com base nestes saldos extraídos:\n\n${accounts}` }] },
+        config: { systemInstruction: systemInstruction, temperature: 0.2 }
+    }));
+    return response.text || "Análise de conformidade não gerada.";
 };
 
 export const chatWithFinancialAgent = async (history: {role: 'user' | 'model', parts: {text: string}[]}[], message: string) => {
