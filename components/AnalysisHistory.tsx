@@ -7,11 +7,56 @@ interface Props {
   history: HistoryItem[];
   onSelect: (item: HistoryItem) => void;
   onClear: () => void;
-  onCompare?: (item1: HistoryItem, item2: HistoryItem) => void; // New Prop
+  onCompare?: (item1: HistoryItem, item2: HistoryItem) => void;
   currentUser?: string;
 }
 
 const ITEMS_PER_PAGE = 10;
+
+// Optimized ListItem Component to prevent re-renders or deep object access
+const HistoryListItem = React.memo(({ item, isSelected, isCompareMode, onClick }: { item: HistoryItem, isSelected: boolean, isCompareMode: boolean, onClick: () => void }) => {
+    
+    const dateStr = new Date(item.timestamp).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+    return (
+        <div 
+            onClick={onClick}
+            className={`bg-white dark:bg-slate-700 p-4 rounded-lg border shadow-sm cursor-pointer transition-all group relative ${
+                isSelected 
+                ? 'border-purple-500 ring-2 ring-purple-500 ring-offset-2' 
+                : 'border-slate-200 dark:border-slate-600 hover:border-blue-400'
+            }`}
+        >
+            {isCompareMode && (
+                <div className={`absolute top-2 right-2 w-5 h-5 rounded border flex items-center justify-center ${isSelected ? 'bg-purple-600 border-purple-600' : 'border-slate-400'}`}>
+                    {isSelected && <span className="text-white text-xs">✓</span>}
+                </div>
+            )}
+
+            <div className="flex justify-between items-start mb-3">
+                <div className="flex-1 mr-2">
+                    <p className="font-bold text-slate-800 dark:text-white text-sm leading-tight">
+                        {item.headerData.companyName || 'Não informada'}
+                    </p>
+                </div>
+                <div className="text-right">
+                    <span className="text-xs font-medium text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-600 px-2 py-1 rounded whitespace-nowrap block">
+                        {dateStr}
+                    </span>
+                </div>
+            </div>
+
+            <div className="flex items-center justify-between border-t border-slate-100 dark:border-slate-600 pt-3">
+                <span className="text-xs text-slate-500 truncate max-w-[60%]">{item.fileName}</span>
+                <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300">
+                        {item.summary.document_type.split(' ')[0]}
+                    </span>
+                </div>
+            </div>
+        </div>
+    );
+});
 
 const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, onClear, onCompare, currentUser }) => {
   const [searchTerm, setSearchTerm] = useState('');
@@ -20,7 +65,6 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
   const [isCompareMode, setIsCompareMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
-  // Reset pagination when filter or modal state changes
   useEffect(() => {
     setItemsToShow(ITEMS_PER_PAGE);
     if (!isOpen) {
@@ -29,17 +73,8 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
     }
   }, [isOpen, searchTerm, viewMode]);
 
-  const formatDate = (isoString: string) => {
-    return new Date(isoString).toLocaleString('pt-BR', {
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    });
-  };
-  
   const filteredHistory = useMemo(() => {
+    // Only access lightweight properties for filtering
     let data = history;
 
     if (viewMode === 'mine' && currentUser) {
@@ -49,15 +84,13 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
         );
     }
 
-    if (!searchTerm.trim()) {
-      return data;
-    }
+    if (!searchTerm.trim()) return data;
+
     const lowercasedFilter = searchTerm.toLowerCase();
     return data.filter(item =>
       (item.headerData.collaboratorName && item.headerData.collaboratorName.toLowerCase().includes(lowercasedFilter)) ||
       (item.headerData.companyName && item.headerData.companyName.toLowerCase().includes(lowercasedFilter)) ||
-      (item.fileName && item.fileName.toLowerCase().includes(lowercasedFilter)) ||
-      formatDate(item.timestamp).includes(lowercasedFilter)
+      (item.fileName && item.fileName.toLowerCase().includes(lowercasedFilter))
     );
   }, [history, searchTerm, viewMode, currentUser]);
 
@@ -74,11 +107,10 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
           setSelectedIds(prev => prev.filter(item => item !== id));
       } else {
           if (selectedIds.length < 2) {
-              // Check compatibility
               if (selectedIds.length === 1) {
                   const firstItem = history.find(h => h.id === selectedIds[0]);
                   if (firstItem && firstItem.summary.document_type !== docType) {
-                      alert("Para comparar, selecione documentos do mesmo tipo (ex: Balanço com Balanço).");
+                      alert("Para comparar, selecione documentos do mesmo tipo.");
                       return;
                   }
               }
@@ -91,42 +123,49 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
 
   const executeComparison = () => {
       if (selectedIds.length !== 2 || !onCompare) return;
+      
+      // Fetch objects from history array (still lightweight/summary mostly)
+      // The parent component (App.tsx) handles fetching the 'fullResult' via its onCompare handler logic
       const item1 = history.find(h => h.id === selectedIds[0]);
       const item2 = history.find(h => h.id === selectedIds[1]);
+      
       if (item1 && item2) {
-          // Sort by timestamp to ensure correct Order (Old -> New)
           const sorted = [item1, item2].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
           onCompare(sorted[0], sorted[1]);
           onClose();
       }
   };
 
+  const handleItemClick = (item: HistoryItem) => {
+      if (isCompareMode) {
+          toggleSelection(item.id, item.summary.document_type);
+      } else {
+          // This triggers the parent to load the full result
+          onSelect(item); 
+          onClose();
+      }
+  };
+
   return (
     <div className={`fixed inset-0 z-50 overflow-hidden transition-all duration-300 ${isOpen ? 'pointer-events-auto' : 'pointer-events-none'}`}>
-      {/* Backdrop */}
       <div 
         className={`absolute inset-0 bg-slate-900/50 backdrop-blur-sm transition-opacity duration-300 ${isOpen ? 'opacity-100' : 'opacity-0'}`}
         onClick={onClose}
       />
 
-      {/* Sidebar */}
       <div className={`absolute inset-y-0 right-0 max-w-md w-full bg-white dark:bg-slate-800 shadow-2xl flex flex-col transition-transform duration-300 ease-in-out ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}>
-        {/* Header */}
         <div className="px-6 py-4 bg-slate-100 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-slate-800 dark:text-white flex items-center">
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 mr-2 text-blue-600 dark:text-blue-400">
               <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
-            Histórico de Consultas
+            Histórico
           </h2>
           <button onClick={onClose} className="text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-white p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-full transition-colors">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-6 h-6">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            ✕
           </button>
         </div>
         
-        {/* FILTERS */}
         <div className="px-4 pt-4 bg-slate-50 dark:bg-slate-800/50">
             <div className="flex items-center justify-between mb-3">
                 <label className="flex items-center cursor-pointer select-none">
@@ -145,100 +184,30 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
             </div>
 
             <div className="flex bg-slate-200 dark:bg-slate-700 rounded-lg p-1 mb-3">
-                <button 
-                    onClick={() => setViewMode('all')} 
-                    className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${
-                        viewMode === 'all' 
-                        ? 'bg-white dark:bg-slate-600 text-blue-600 dark:text-blue-300 shadow-sm' 
-                        : 'text-slate-500 dark:text-slate-400 hover:text-slate-700'
-                    }`}
-                >
-                    Todas
-                </button>
-                <button 
-                    onClick={() => setViewMode('mine')} 
-                    disabled={!currentUser}
-                    title={!currentUser ? "Defina um colaborador na tela inicial" : ""}
-                    className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${
-                        viewMode === 'mine' 
-                        ? 'bg-white dark:bg-slate-600 text-blue-600 dark:text-blue-300 shadow-sm' 
-                        : 'text-slate-500 dark:text-slate-400 hover:text-slate-700 disabled:opacity-40 disabled:cursor-not-allowed'
-                    }`}
-                >
-                    Meus Relatórios
-                </button>
+                <button onClick={() => setViewMode('all')} className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${viewMode === 'all' ? 'bg-white dark:bg-slate-600 text-blue-600 dark:text-blue-300 shadow-sm' : 'text-slate-500'}`}>Todas</button>
+                <button onClick={() => setViewMode('mine')} disabled={!currentUser} className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${viewMode === 'mine' ? 'bg-white dark:bg-slate-600 text-blue-600 dark:text-blue-300 shadow-sm' : 'text-slate-500 disabled:opacity-40'}`}>Meus Relatórios</button>
             </div>
             
             <div className="relative mb-2">
-                <input
-                type="text"
-                placeholder="Filtrar..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-3 pr-4 py-2 border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
+                <input type="text" placeholder="Filtrar por empresa ou data..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full pl-3 pr-4 py-2 border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white rounded-lg text-sm" />
             </div>
         </div>
 
-        {/* Content */}
         <div className="flex-1 overflow-y-auto p-4 bg-slate-50 dark:bg-slate-800/50">
           {history.length === 0 ? (
-            <div className="text-center py-12 text-slate-500 dark:text-slate-400">
-              <p>Nenhuma análise salva.</p>
-            </div>
+            <div className="text-center py-12 text-slate-500 dark:text-slate-400"><p>Nenhuma análise salva.</p></div>
           ) : filteredHistory.length === 0 ? (
-             <div className="text-center py-12 text-slate-500 dark:text-slate-400">
-                <p>Nenhum resultado encontrado.</p>
-            </div>
+             <div className="text-center py-12 text-slate-500 dark:text-slate-400"><p>Nenhum resultado encontrado.</p></div>
           ) : (
             <div className="space-y-3">
               {displayedItems.map((item) => (
-                <div 
-                  key={item.id}
-                  onClick={() => {
-                      if (isCompareMode) {
-                          toggleSelection(item.id, item.summary.document_type);
-                      } else {
-                          onSelect(item); 
-                          onClose();
-                      }
-                  }}
-                  className={`bg-white dark:bg-slate-700 p-4 rounded-lg border shadow-sm cursor-pointer transition-all group relative ${
-                      selectedIds.includes(item.id) 
-                      ? 'border-purple-500 ring-2 ring-purple-500 ring-offset-2' 
-                      : 'border-slate-200 dark:border-slate-600 hover:border-blue-400'
-                  }`}
-                >
-                  {isCompareMode && (
-                      <div className={`absolute top-2 right-2 w-5 h-5 rounded border flex items-center justify-center ${selectedIds.includes(item.id) ? 'bg-purple-600 border-purple-600' : 'border-slate-400'}`}>
-                          {selectedIds.includes(item.id) && <span className="text-white text-xs">✓</span>}
-                      </div>
-                  )}
-
-                  {/* Row 1: Company & Date */}
-                  <div className="flex justify-between items-start mb-3">
-                    <div className="flex-1 mr-2">
-                        <p className="font-bold text-slate-800 dark:text-white text-sm leading-tight">
-                            {item.headerData.companyName || 'Não informada'}
-                        </p>
-                    </div>
-                    <div className="text-right">
-                        <span className="text-xs font-medium text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-600 px-2 py-1 rounded whitespace-nowrap block">
-                            {formatDate(item.timestamp)}
-                        </span>
-                    </div>
-                  </div>
-
-                  {/* Row 3: File & Details */}
-                  <div className="flex items-center justify-between border-t border-slate-100 dark:border-slate-600 pt-3">
-                     <span className="text-xs text-slate-500 truncate max-w-[60%]">{item.fileName}</span>
-                     <div className="flex items-center gap-2">
-                        <span className="text-[10px] font-bold px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300">
-                            {item.summary.document_type.split(' ')[0]}
-                        </span>
-                     </div>
-                  </div>
-                </div>
+                <HistoryListItem 
+                    key={item.id} 
+                    item={item} 
+                    isSelected={selectedIds.includes(item.id)} 
+                    isCompareMode={isCompareMode} 
+                    onClick={() => handleItemClick(item)}
+                />
               ))}
               
               {filteredHistory.length > itemsToShow && (
@@ -250,10 +219,9 @@ const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, 
           )}
         </div>
 
-        {/* Footer */}
         {!isCompareMode && history.length > 0 && (
           <div className="p-4 bg-slate-100 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700">
-            <button onClick={onClear} className="w-full py-2 px-4 bg-white dark:bg-slate-800 border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-md text-sm font-medium transition-colors">
+            <button onClick={onClear} className="w-full py-2 px-4 bg-white dark:bg-slate-800 border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-50 rounded-md text-sm font-medium transition-colors">
               Limpar Cache
             </button>
           </div>

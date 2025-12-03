@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import HeaderInputs from './components/HeaderInputs';
 import FileUploader from './components/FileUploader';
 import AnalysisViewer from './components/AnalysisViewer';
@@ -44,7 +44,13 @@ const App: React.FC = () => {
 
   useEffect(() => {
     const savedHistory = localStorage.getItem(HISTORY_STORAGE_KEY);
-    if (savedHistory) setHistory(JSON.parse(savedHistory));
+    if (savedHistory) {
+        try {
+            setHistory(JSON.parse(savedHistory));
+        } catch (e) {
+            console.error("Failed to load history", e);
+        }
+    }
     const savedTheme = localStorage.getItem(THEME_STORAGE_KEY);
     if (savedTheme === 'dark' || (!savedTheme && window.matchMedia('(prefers-color-scheme: dark)').matches)) {
         setDarkMode(true);
@@ -59,22 +65,49 @@ const App: React.FC = () => {
     else { document.documentElement.classList.remove('dark'); localStorage.setItem(THEME_STORAGE_KEY, 'light'); }
   };
 
-  const saveToHistory = (result: AnalysisResult, header: HeaderData, fileName: string) => {
-    const id = Date.now().toString();
-    try { localStorage.setItem(`${CACHE_STORAGE_PREFIX}${id}`, JSON.stringify(result)); } catch (e) { console.warn("Cache full"); }
-    const newItem: HistoryItem = { id, timestamp: new Date().toISOString(), headerData: { ...header }, fileName, summary: result.summary };
-    const updated = [newItem, ...history].slice(0, MAX_HISTORY_ITEMS);
-    setHistory(updated);
-    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updated));
-  };
-
+  // Helper to get full result from cache
   const getFullResult = (item: HistoryItem): AnalysisResult | null => {
       let fullResult = item.fullResult;
       if (!fullResult) {
-          const cached = localStorage.getItem(`${CACHE_STORAGE_PREFIX}${item.id}`);
-          if (cached) fullResult = JSON.parse(cached);
+          try {
+            const cached = localStorage.getItem(`${CACHE_STORAGE_PREFIX}${item.id}`);
+            if (cached) fullResult = JSON.parse(cached);
+          } catch (e) {
+            console.warn("Failed to retrieve cached result", e);
+          }
       }
       return fullResult || null;
+  };
+
+  const saveToHistory = (result: AnalysisResult, header: HeaderData, fileName: string) => {
+    const id = Date.now().toString();
+    
+    // Save full result to separate cache key to avoid localStorage quota on main history list
+    try { 
+        localStorage.setItem(`${CACHE_STORAGE_PREFIX}${id}`, JSON.stringify(result)); 
+    } catch (e) { 
+        console.warn("Cache full, could not save detailed result", e); 
+        // We proceed to save at least the summary
+    }
+
+    const newItem: HistoryItem = { 
+        id, 
+        timestamp: new Date().toISOString(), 
+        headerData: { ...header }, 
+        fileName, 
+        summary: result.summary 
+    };
+
+    // Use functional update to ensure we have the latest state and persist correctly
+    setHistory(prevHistory => {
+        const updated = [newItem, ...prevHistory].slice(0, MAX_HISTORY_ITEMS);
+        try {
+            localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updated));
+        } catch (e) {
+            console.error("Failed to save history list", e);
+        }
+        return updated;
+    });
   };
 
   const loadFromHistory = (item: HistoryItem) => {
@@ -85,8 +118,8 @@ const App: React.FC = () => {
           setAnalysisTimestamp(item.timestamp);
           setSelectedFile({ file: { name: item.fileName } as File, base64: '', mimeType: '' });
           setError(null);
-          setComparisonResult(null); // Clear comparison if loading single item
-      } else { alert("Detalhes não encontrados no cache."); }
+          setComparisonResult(null); 
+      } else { alert("Detalhes não encontrados no cache (podem ter sido limpos)."); }
   };
 
   const handleComparison = (item1: HistoryItem, item2: HistoryItem) => {
@@ -148,10 +181,14 @@ const App: React.FC = () => {
     try {
       const mime = selectedFile.mimeType || selectedFile.file.type;
       const result = await analyzeDocument(selectedFile.base64, mime);
+      
+      // Save FIRST, then set state to ensure consistency
+      saveToHistory(result, headerData, selectedFile.file.name);
+      
       setAnalysisTimestamp(new Date().toISOString());
       setAnalysisResult(result);
       setComparisonResult(null);
-      saveToHistory(result, headerData, selectedFile.file.name);
+      
     } catch (err: any) {
       console.error(err);
       setError(err.message || "Erro desconhecido na análise.");
@@ -159,6 +196,39 @@ const App: React.FC = () => {
   };
 
   const handleReset = () => { setAnalysisResult(null); setComparisonResult(null); setSelectedFile(null); setError(null); };
+
+  // Calculate Previous Period Accounts for Validation
+  const previousAccounts = useMemo(() => {
+    if (!analysisResult || !headerData.companyName) return undefined;
+    
+    // Find a history item for the SAME company, SAME doc type, but OLDER than current analysis
+    // Since we just saved the current analysis to history, it might be the first item. We look for the next one.
+    const relevantHistory = history.filter(h => 
+        h.headerData.companyName.toLowerCase() === headerData.companyName.toLowerCase() &&
+        h.summary.document_type === analysisResult.summary.document_type
+    );
+
+    // If we just saved it, relevantHistory[0] is current. relevantHistory[1] is previous.
+    // If we loaded from history, we need to find one with timestamp < current.
+    
+    // Simple heuristic: Take the history item at index 1 if index 0 matches current, or just find first that isn't this one
+    // Assuming history is sorted desc.
+    
+    // Filter out the current analysis by timestamp or rough equality
+    const currentTs = analysisTimestamp ? new Date(analysisTimestamp).getTime() : Date.now();
+    
+    const previousItem = relevantHistory.find(h => {
+        const itemTs = new Date(h.timestamp).getTime();
+        // Allow a small buffer for "just saved" items, but generally look for older
+        return itemTs < (currentTs - 1000); 
+    });
+
+    if (previousItem) {
+        const full = getFullResult(previousItem);
+        return full?.accounts;
+    }
+    return undefined;
+  }, [analysisResult, history, headerData.companyName, analysisTimestamp]);
 
   const isReady = !isLoading && selectedFile !== null && selectedFile.base64.length > 0;
 
@@ -221,7 +291,11 @@ const App: React.FC = () => {
 
         {analysisResult && !isLoading && !comparisonResult && (
             <div className="animate-fadeIn">
-                <AnalysisViewer result={analysisResult} headerData={headerData} />
+                <AnalysisViewer 
+                    result={analysisResult} 
+                    headerData={headerData} 
+                    previousAccounts={previousAccounts}
+                />
             </div>
         )}
 
