@@ -3,7 +3,7 @@ import { AnalysisResult, ExtractedAccount, HeaderData } from '../types';
 import { generateFinancialInsight, generateCMVAnalysis, generateSpedComplianceCheck } from '../services/geminiService';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 
 interface Props {
   result: AnalysisResult;
@@ -30,7 +30,6 @@ const DEFAULT_THEMES: TableTheme[] = [
 
 const TABLE_THEME_KEY = 'auditAI_table_theme';
 const DEFAULT_EBITDA_MULTIPLE_KEY = 'auditAI_default_ebitda_multiple';
-const CHART_COLORS = ['#2563eb', '#16a34a', '#d97706', '#dc2626', '#7c3aed'];
 
 const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
   const [sortConfig, setSortConfig] = useState<{ key: SortKey; direction: 'asc' | 'desc' } | null>(null);
@@ -158,45 +157,26 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData }) => {
       return accounts.filter(a => a.possible_inversion && !a.is_synthetic);
   }, [accounts]);
 
-  // --- CHART DATA PREPARATION ---
+  // --- CHART DATA PREPARATION (BarChart Structure) ---
   const chartData = useMemo(() => {
-      if (!accounts || accounts.length === 0) return null;
+      if (!accounts || accounts.length === 0) return [];
 
-      // Filter analytical accounts only
+      // Filter analytical accounts only and sort by highest absolute balance
       const analytical = accounts.filter(a => !a.is_synthetic);
       
-      // Sort by magnitude of final balance to get the "Top 5" most significant accounts
       const topAccounts = analytical
+          .filter(a => Math.abs(a.final_balance) > 0 || Math.abs(a.initial_balance) > 0) // Ensure we have data
           .sort((a, b) => Math.abs(b.final_balance) - Math.abs(a.final_balance))
           .slice(0, 5);
 
-      if (topAccounts.length === 0) return null;
+      if (topAccounts.length === 0) return [];
 
-      // Structure data for Recharts: [{ name: 'Inicial', Account1: 100, Account2: 50 }, { name: 'Final', Account1: 120, ... }]
-      const startPoint: any = { name: 'Saldo Inicial' };
-      const endPoint: any = { name: 'Saldo Final' };
-      
-      const lines: { key: string, name: string, color: string }[] = [];
-
-      topAccounts.forEach((acc, index) => {
-          // Use a sanitized key
-          const key = `acc_${index}`;
-          const displayName = acc.account_name.length > 20 ? acc.account_name.substring(0, 20) + '...' : acc.account_name;
-          
-          startPoint[key] = acc.initial_balance;
-          endPoint[key] = acc.final_balance;
-          
-          lines.push({
-              key,
-              name: displayName,
-              color: CHART_COLORS[index % CHART_COLORS.length]
-          });
-      });
-
-      return {
-          data: [startPoint, endPoint],
-          lines
-      };
+      return topAccounts.map(acc => ({
+          name: acc.account_name.length > 15 ? acc.account_name.substring(0, 15) + '...' : acc.account_name,
+          fullName: acc.account_name,
+          initial: acc.initial_balance,
+          final: acc.final_balance
+      }));
   }, [accounts]);
 
   const finalResultValue = useMemo(() => {
@@ -575,51 +555,42 @@ Status: ${summary.is_balanced ? 'Balanceado' : 'Desbalanceado'}
       </div>
 
        {/* CHART SECTION */}
-       {chartData && (
+       {chartData.length > 0 && (
           <div id="chart" className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden print:hidden">
             <div className="px-6 py-4 bg-slate-100 dark:bg-slate-900 border-b dark:border-slate-700 flex justify-between items-center">
                 <h3 className="text-lg font-semibold dark:text-white flex items-center gap-2">
-                    <span>📈</span> Evolução das Principais Contas
+                    <span>📈</span> Evolução das Principais Contas (Top 5)
                 </h3>
                 <button onClick={() => setIsChartExpanded(!isChartExpanded)} className="text-slate-500 hover:text-slate-700 dark:text-slate-400 font-mono text-xl">
                     {isChartExpanded ? '▼' : '▶'}
                 </button>
             </div>
             {isChartExpanded && (
-                <div className="p-6 h-[400px] w-full">
+                <div className="p-6 w-full" style={{ height: 400 }}>
                     <ResponsiveContainer width="100%" height="100%">
-                        <LineChart data={chartData.data} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
+                        <BarChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
                             <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
                             <XAxis 
                                 dataKey="name" 
                                 stroke="#64748b" 
-                                tick={{ fill: '#64748b', fontSize: 12 }}
+                                tick={{ fill: '#64748b', fontSize: 11 }}
                             />
                             <YAxis 
                                 stroke="#64748b"
-                                tick={{ fill: '#64748b', fontSize: 12 }}
+                                tick={{ fill: '#64748b', fontSize: 11 }}
                                 tickFormatter={(value) => new Intl.NumberFormat('pt-BR', { notation: "compact", compactDisplay: "short" }).format(value)} 
                             />
                             <Tooltip 
                                 formatter={(value: number) => formatCurrency(value)}
-                                contentStyle={{ backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                                cursor={{ fill: 'rgba(0,0,0,0.05)' }}
+                                contentStyle={{ backgroundColor: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)', color: '#334155' }}
                             />
                             <Legend wrapperStyle={{ paddingTop: '20px' }} />
-                            {chartData.lines.map((line) => (
-                                <Line 
-                                    key={line.key}
-                                    type="monotone" 
-                                    dataKey={line.key} 
-                                    name={line.name}
-                                    stroke={line.color} 
-                                    strokeWidth={3}
-                                    activeDot={{ r: 6 }}
-                                    dot={{ r: 4 }}
-                                />
-                            ))}
-                        </LineChart>
+                            <Bar dataKey="initial" name="Saldo Anterior" fill="#94a3b8" radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                            <Bar dataKey="final" name="Saldo Atual" fill="#2563eb" radius={[4, 4, 0, 0]} isAnimationActive={false} />
+                        </BarChart>
                     </ResponsiveContainer>
-                    <p className="text-center text-xs text-slate-400 mt-2 italic">Exibindo as 5 contas analíticas com maior movimentação ou saldo final.</p>
+                    <p className="text-center text-xs text-slate-400 mt-2 italic">Comparativo Saldo Inicial vs Final das 5 contas analíticas com maior movimentação.</p>
                 </div>
             )}
           </div>

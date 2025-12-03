@@ -23,7 +23,7 @@ const FileUploader: React.FC<Props> = ({ onFileSelected, isLoading, selectedFile
   const processFile = useCallback((file: File) => {
     const validTypes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel', 'text/csv', 'text/plain'];
     // Allow basic checking, but rely on extension as well for safety
-    if (!validTypes.includes(file.type) && !file.name.endsWith('.xlsx') && !file.name.endsWith('.xls') && !file.name.endsWith('.pdf') && !file.name.endsWith('.txt')) {
+    if (!validTypes.includes(file.type) && !file.name.endsWith('.xlsx') && !file.name.endsWith('.xls') && !file.name.endsWith('.pdf') && !file.name.endsWith('.txt') && !file.name.endsWith('.csv')) {
         alert("Formato inválido. Use PDF, Excel ou TXT (SPED).");
         return;
     }
@@ -95,8 +95,15 @@ const FileUploader: React.FC<Props> = ({ onFileSelected, isLoading, selectedFile
         reader.onload = (e) => {
           if (e.target?.result && typeof e.target.result === 'string') {
             setUploadProgress(100);
+            
+            // Determine MimeType if missing
+            let mimeType = file.type;
+            if (!mimeType) {
+                if (file.name.toLowerCase().endsWith('.pdf')) mimeType = 'application/pdf';
+            }
+
             setTimeout(() => {
-                onFileSelected(file, e.target!.result!.toString().split(',')[1], file.type);
+                onFileSelected(file, e.target!.result!.toString().split(',')[1], mimeType);
                 setIsReading(false);
             }, 500);
           }
@@ -179,7 +186,7 @@ const FileUploader: React.FC<Props> = ({ onFileSelected, isLoading, selectedFile
                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-12 h-12"><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5" /></svg>
               </div>
               <p className="mb-2 text-xl text-slate-700 font-semibold"><span className="text-blue-600 hover:underline">Clique para carregar</span> ou arraste</p>
-              <p className="text-sm text-slate-500">Suporta PDF, Excel e TXT (SPED/ECD/ECF)</p>
+              <p className="text-sm text-slate-500 max-w-xs mx-auto">Suporta PDF (OCR Avançado), Excel e TXT (SPED/ECD/ECF). Tabelas complexas são processadas automaticamente.</p>
             </>
           )}
         </div>

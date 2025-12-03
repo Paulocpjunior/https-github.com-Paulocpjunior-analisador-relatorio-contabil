@@ -326,26 +326,41 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
     ];
 
     let promptText = `
-    ROLE: OCR/Data Extractor.
-    TASK: Convert financial tables to structured TEXT lines.
+    ROLE: Expert Financial OCR & Data Extractor.
+    TASK: Extract accounting data from complex, potentially messy financial reports (PDF/Image) into structured text.
+
+    CRITICAL INSTRUCTIONS FOR COMPLEX TABLES:
+    1. **Structure Detection**: Identify rows that represent accounting accounts. 
+       - Look for columns: [Code] | [Account Name] | [Balance/Values].
+    2. **Handle Merged/Misaligned Data**: 
+       - If a row spans multiple lines visually (e.g. name wraps), merge it into a single logical line.
+       - If columns are empty (e.g. no Initial Balance), assume 0,00 or keep blank but maintain alignment.
+    3. **Ignore Layout Noise**: 
+       - Disregard page headers, footers, page numbers ("Página X de Y"), dates printed at top/bottom, and separator lines.
+    4. **Column Separation**: 
+       - Use the pipe character '|' strictly to separate columns.
+    5. **Number Integrity**: 
+       - Extract ALL numeric columns found (Initial, Debit, Credit, Final). Do not skip columns.
+       - Keep original formatting (e.g., "1.000,00"). 
+       - PRESERVE negative signs or parenthesis '()'.
+       - PRESERVE 'D' (Debit) or 'C' (Credit) indicators at the end of the line.
+
+    OUTPUT FORMAT (Strict text lines):
+    Code | Account Description | Value 1 | Value 2 | ... | Final Value (D/C)
     
-    RULES:
-    1. EXTRACT rows with account data.
-    2. USE '|' (PIPE) to separate columns if possible.
-    3. KEEP original number formatting.
-    4. CRITICAL: Preserve 'D' or 'C' indicators at end of lines (e.g. "100,00 D").
-    5. IGNORE Page headers/footers.
-    6. IF DOCUMENT IS AN IMAGE/PDF: Perform high-quality OCR.
+    EXAMPLES:
+    1.01.01 | Caixa Geral | 0,00 | 1.500,00 | 0,00 | 1.500,00 D
+    2.01.03 | Fornecedores Nacionais | 200,00 C | 500,00 | 0,00 | 700,00 C
+    3.01 | Receita Bruta de Vendas e Serviços | (10.000,00) | C
     
-    EXAMPLE OUTPUT:
-    1.01 | Caixa Geral | 1000,00 D
-    2.01 | Fornecedores | 500,00 C
+    NOTE: If the document contains multiple periods (e.g., 2024 and 2023), try to extract both if they are on the same row, or prioritize the most recent period.
     `;
 
     try {
         console.log(`Starting Extraction for ${mimeType}...`);
         
         let contents;
+        let isBinary = false;
         
         // OPTIMIZATION: Handle Text/CSV as direct text to avoid 'inlineData' parsing issues with some models
         if (mimeType === 'text/csv' || mimeType === 'text/plain' || mimeType === 'application/csv') {
@@ -371,6 +386,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
             ]};
         } else {
             // Binary formats (PDF, Image) use inlineData
+            isBinary = true;
             contents = { parts: [
                 { inlineData: { mimeType: mimeType, data: fileBase64 } },
                 { text: promptText }
@@ -383,14 +399,42 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
             config: { temperature: 0.1, maxOutputTokens: 8192, safetySettings: safetySettings }
         }));
 
-        let text = response.text || '';
+        let text = "";
+        try {
+            text = response.text || "";
+        } catch (e) {
+            console.warn("Could not read response text.");
+        }
         
-        // Check for refusal or safety blocks if text is empty
-        if (!text && response.candidates && response.candidates.length > 0) {
-            const candidate = response.candidates[0];
-            if (candidate.finishReason !== 'STOP') {
-                console.warn(`Model finish reason: ${candidate.finishReason}`);
+        // FALLBACK: If standard prompt fails (empty text), try a very simple one.
+        // This handles cases where the model gets confused by complex instructions on complex PDFs.
+        if (!text || text.length < 50) {
+            console.warn("Short response received. Attempting fallback with simplified prompt...");
+            
+            const simplePrompt = "Extract all accounting table rows from this document. Format: Code | Account | Value.";
+            let fallbackContents;
+            
+            if (isBinary) {
+                fallbackContents = { parts: [
+                    { inlineData: { mimeType: mimeType, data: fileBase64 } },
+                    { text: simplePrompt }
+                ]};
+            } else {
+                 fallbackContents = { parts: [
+                    { text: simplePrompt },
+                    contents.parts[1]
+                ]};
             }
+            
+            const fallbackResponse = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+                model: 'gemini-2.5-flash',
+                contents: fallbackContents,
+                config: { temperature: 0.1, maxOutputTokens: 8192, safetySettings: safetySettings }
+            }));
+            
+            try {
+                text = fallbackResponse.text || "";
+            } catch(e) {}
         }
 
         if (text.length < 50) {
