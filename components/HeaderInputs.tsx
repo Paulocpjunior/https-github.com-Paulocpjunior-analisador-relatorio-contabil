@@ -1,13 +1,15 @@
+
 import React, { useState } from 'react';
 import { HeaderData } from '../types';
 
 interface Props {
   data: HeaderData;
   onChange: (data: HeaderData) => void;
+  onSave?: () => void;
   disabled?: boolean;
 }
 
-const HeaderInputs: React.FC<Props> = ({ data, onChange, disabled }) => {
+const HeaderInputs: React.FC<Props> = ({ data, onChange, onSave, disabled }) => {
   const [cnpjError, setCnpjError] = useState(false);
   const [isLoadingCnpj, setIsLoadingCnpj] = useState(false);
 
@@ -128,12 +130,14 @@ const HeaderInputs: React.FC<Props> = ({ data, onChange, disabled }) => {
   };
 
   return (
-    <div className="bg-white dark:bg-slate-800 p-6 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 mb-6 transition-colors">
-      <h2 className="text-lg font-semibold text-slate-800 dark:text-white mb-4 flex items-center">
-        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 mr-2 text-accent">
-          <path strokeLinecap="round" strokeLinejoin="round" d="M15 9h3.75M15 12h3.75M15 15h3.75M4.5 19.5h15a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25v10.5A2.25 2.25 0 004.5 19.5zm6-10.125a1.875 1.875 0 11-3.75 0 1.875 1.875 0 013.75 0zm1.294 6.336a6.721 6.721 0 01-3.17.789 6.721 6.721 0 01-3.168-.789 3.376 3.376 0 016.338 0z" />
-        </svg>
-        Informações da Auditoria
+    <div className="bg-white dark:bg-slate-800 p-6 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 mb-6 transition-colors relative">
+      <h2 className="text-lg font-semibold text-slate-800 dark:text-white mb-4 flex items-center justify-between">
+        <span className="flex items-center">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 mr-2 text-accent">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M15 9h3.75M15 12h3.75M15 15h3.75M4.5 19.5h15a2.25 2.25 0 002.25-2.25V6.75A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25v10.5A2.25 2.25 0 004.5 19.5zm6-10.125a1.875 1.875 0 11-3.75 0 1.875 1.875 0 013.75 0zm1.294 6.336a6.721 6.721 0 01-3.17.789 6.721 6.721 0 01-3.168-.789 3.376 3.376 0 016.338 0z" />
+            </svg>
+            Informações da Auditoria
+        </span>
       </h2>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div>
@@ -189,18 +193,32 @@ const HeaderInputs: React.FC<Props> = ({ data, onChange, disabled }) => {
           <label htmlFor="collaboratorName" className="block text-sm font-bold text-blue-600 dark:text-blue-400 mb-1">
             Colaborador Responsável
           </label>
-          <input
-            type="text"
-            id="collaboratorName"
-            name="collaboratorName"
-            value={data.collaboratorName}
-            onChange={handleChange}
-            disabled={disabled}
-            placeholder="Ex: João Silva"
-            className="w-full px-4 py-2 border border-blue-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors disabled:bg-slate-100 disabled:cursor-not-allowed bg-blue-600 text-white placeholder-blue-200 font-medium dark:bg-blue-900/50 dark:border-blue-500"
-          />
+          <div className="flex gap-2">
+            <input
+                type="text"
+                id="collaboratorName"
+                name="collaboratorName"
+                value={data.collaboratorName}
+                onChange={handleChange}
+                disabled={disabled}
+                placeholder="Ex: João Silva"
+                className="w-full px-4 py-2 border border-blue-700 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-colors disabled:bg-slate-100 disabled:cursor-not-allowed bg-blue-600 text-white placeholder-blue-200 font-medium dark:bg-blue-900/50 dark:border-blue-500"
+            />
+          </div>
         </div>
       </div>
+      {onSave && (
+        <div className="mt-4 flex justify-end">
+            <button 
+                onClick={onSave}
+                disabled={disabled || !data.companyName}
+                className="flex items-center gap-2 px-4 py-2 bg-slate-100 dark:bg-slate-700 hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-700 dark:text-slate-200 rounded-lg text-sm font-bold transition-colors disabled:opacity-50"
+            >
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4" /></svg>
+                Salvar Rascunho
+            </button>
+        </div>
+      )}
     </div>
   );
 };

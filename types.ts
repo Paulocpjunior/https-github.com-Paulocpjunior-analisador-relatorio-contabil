@@ -1,3 +1,4 @@
+
 export interface HeaderData {
   companyName: string;
   collaboratorName: string;
@@ -70,4 +71,27 @@ export interface ComparisonResult {
   period2Label: string;
   rows: ComparisonRow[];
   documentType: string;
+}
+
+// --- CONSOLIDATION TYPES ---
+export interface ConsolidatedCompany {
+  id: string;
+  name: string;
+  cnpj: string;
+}
+
+export interface ConsolidatedRow {
+  code: string;
+  name: string;
+  is_synthetic: boolean;
+  level: number;
+  values: { [companyId: string]: number }; // Value per company
+  total: number; // Sum of all companies
+}
+
+export interface ConsolidationResult {
+  companies: ConsolidatedCompany[];
+  rows: ConsolidatedRow[];
+  generatedAt: string;
+  groupName: string; // Usually derived from first company or generic
 }

@@ -1,3 +1,4 @@
+
 import React, { useState, useMemo, useEffect } from 'react';
 import { HistoryItem } from '../types';
 
@@ -7,225 +8,327 @@ interface Props {
   history: HistoryItem[];
   onSelect: (item: HistoryItem) => void;
   onClear: () => void;
+  onDeleteItem?: (id: string) => void;
   onCompare?: (item1: HistoryItem, item2: HistoryItem) => void;
+  onConsolidate?: (items: HistoryItem[]) => void;
   currentUser?: string;
 }
 
-const ITEMS_PER_PAGE = 10;
+const ITEMS_PER_PAGE = 8;
 
-// Optimized ListItem Component to prevent re-renders or deep object access
-const HistoryListItem = React.memo(({ item, isSelected, isCompareMode, onClick }: { item: HistoryItem, isSelected: boolean, isCompareMode: boolean, onClick: () => void }) => {
-    
-    const dateStr = new Date(item.timestamp).toLocaleString('pt-BR', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+const HistoryListItem = React.memo(({ 
+    item, 
+    isSelected, 
+    isSelectionMode, 
+    onClick,
+    onDelete 
+}: { 
+    item: HistoryItem, 
+    isSelected: boolean, 
+    isSelectionMode: boolean, 
+    onClick: () => void,
+    onDelete: (e: React.MouseEvent) => void
+}) => {
+    const dateStr = new Date(item.timestamp).toLocaleString('pt-BR', { 
+        day: '2-digit', month: '2-digit', year: 'numeric', 
+        hour: '2-digit', minute: '2-digit' 
+    });
+
+    const docTypeColors: Record<string, string> = {
+        'Balanço Patrimonial': 'bg-blue-100 text-blue-700 border-blue-200',
+        'DRE': 'bg-emerald-100 text-emerald-700 border-emerald-200',
+        'Balancete': 'bg-purple-100 text-purple-700 border-purple-200',
+        'Outro': 'bg-slate-100 text-slate-700 border-slate-200'
+    };
 
     return (
         <div 
             onClick={onClick}
-            className={`bg-white dark:bg-slate-700 p-4 rounded-lg border shadow-sm cursor-pointer transition-all group relative ${
+            className={`group relative p-4 rounded-xl border transition-all duration-200 cursor-pointer shadow-sm ${
                 isSelected 
-                ? 'border-purple-500 ring-2 ring-purple-500 ring-offset-2' 
-                : 'border-slate-200 dark:border-slate-600 hover:border-blue-400'
+                ? 'border-blue-500 ring-2 ring-blue-500/20 bg-blue-50/30 dark:bg-blue-900/10' 
+                : 'border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 hover:border-blue-300 dark:hover:border-slate-500'
             }`}
         >
-            {isCompareMode && (
-                <div className={`absolute top-2 right-2 w-5 h-5 rounded border flex items-center justify-center ${isSelected ? 'bg-purple-600 border-purple-600' : 'border-slate-400'}`}>
-                    {isSelected && <span className="text-white text-xs">✓</span>}
+            {isSelectionMode && (
+                <div className={`absolute top-3 right-3 w-6 h-6 rounded-full border-2 flex items-center justify-center transition-colors ${
+                    isSelected ? 'bg-blue-600 border-blue-600 shadow-lg shadow-blue-500/30' : 'border-slate-300 dark:border-slate-600'
+                }`}>
+                    {isSelected && <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" /></svg>}
                 </div>
             )}
 
-            <div className="flex justify-between items-start mb-3">
-                <div className="flex-1 mr-2">
-                    <p className="font-bold text-slate-800 dark:text-white text-sm leading-tight">
-                        {item.headerData.companyName || 'Não informada'}
-                    </p>
-                </div>
-                <div className="text-right">
-                    <span className="text-xs font-medium text-slate-600 dark:text-slate-300 bg-slate-100 dark:bg-slate-600 px-2 py-1 rounded whitespace-nowrap block">
-                        {dateStr}
-                    </span>
-                </div>
+            {!isSelectionMode && (
+                <button 
+                    onClick={onDelete}
+                    className="absolute top-3 right-3 p-1.5 text-slate-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all rounded-md hover:bg-red-50 dark:hover:bg-red-900/20"
+                    title="Excluir do histórico"
+                >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg>
+                </button>
+            )}
+
+            <div className="mb-3">
+                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border uppercase tracking-wider ${docTypeColors[item.summary.document_type] || docTypeColors['Outro']}`}>
+                    {item.summary.document_type}
+                </span>
+                <p className="font-bold text-slate-800 dark:text-white mt-1.5 leading-tight truncate pr-8" title={item.headerData.companyName}>
+                    {item.headerData.companyName || 'Empresa não Identificada'}
+                </p>
+                <p className="text-[10px] text-slate-400 font-mono mt-0.5">{item.headerData.cnpj || 'CNPJ não inf.'}</p>
             </div>
 
-            <div className="flex items-center justify-between border-t border-slate-100 dark:border-slate-600 pt-3">
-                <span className="text-xs text-slate-500 truncate max-w-[60%]">{item.fileName}</span>
-                <div className="flex items-center gap-2">
-                    <span className="text-[10px] font-bold px-1.5 py-0.5 rounded border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300">
-                        {item.summary.document_type.split(' ')[0]}
-                    </span>
+            <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400">
+                <div className="flex items-center gap-1.5">
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" /></svg>
+                    {dateStr}
+                </div>
+                <div className="flex items-center gap-1.5 max-w-[100px] truncate">
+                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" /></svg>
+                    {item.headerData.collaboratorName || 'Sistema'}
                 </div>
             </div>
         </div>
     );
 });
 
-const AnalysisHistory: React.FC<Props> = ({ isOpen, onClose, history, onSelect, onClear, onCompare, currentUser }) => {
+const AnalysisHistory: React.FC<Props> = ({ 
+    isOpen, 
+    onClose, 
+    history, 
+    onSelect, 
+    onClear, 
+    onDeleteItem,
+    onCompare,
+    onConsolidate, 
+    currentUser 
+}) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [viewMode, setViewMode] = useState<'all' | 'mine'>('all');
   const [itemsToShow, setItemsToShow] = useState(ITEMS_PER_PAGE);
-  const [isCompareMode, setIsCompareMode] = useState(false);
+  const [isSelectionMode, setIsSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
 
   useEffect(() => {
-    setItemsToShow(ITEMS_PER_PAGE);
     if (!isOpen) {
-        setIsCompareMode(false);
+        setIsSelectionMode(false);
         setSelectedIds([]);
+        setSearchTerm('');
     }
-  }, [isOpen, searchTerm, viewMode]);
+  }, [isOpen]);
 
   const filteredHistory = useMemo(() => {
-    // Only access lightweight properties for filtering
-    let data = history;
+    let data = [...history];
 
     if (viewMode === 'mine' && currentUser) {
         data = data.filter(item => 
-            item.headerData.collaboratorName && 
-            item.headerData.collaboratorName.toLowerCase().trim() === currentUser.toLowerCase().trim()
+            item.headerData.collaboratorName?.toLowerCase().trim() === currentUser.toLowerCase().trim()
         );
     }
 
-    if (!searchTerm.trim()) return data;
-
-    const lowercasedFilter = searchTerm.toLowerCase();
-    return data.filter(item =>
-      (item.headerData.collaboratorName && item.headerData.collaboratorName.toLowerCase().includes(lowercasedFilter)) ||
-      (item.headerData.companyName && item.headerData.companyName.toLowerCase().includes(lowercasedFilter)) ||
-      (item.fileName && item.fileName.toLowerCase().includes(lowercasedFilter))
-    );
+    if (searchTerm.trim()) {
+        const s = searchTerm.toLowerCase();
+        data = data.filter(item =>
+          item.headerData.companyName?.toLowerCase().includes(s) ||
+          item.fileName?.toLowerCase().includes(s) ||
+          item.summary.document_type.toLowerCase().includes(s)
+        );
+    }
+    return data;
   }, [history, searchTerm, viewMode, currentUser]);
 
-  const displayedItems = useMemo(() => {
-    return filteredHistory.slice(0, itemsToShow);
-  }, [filteredHistory, itemsToShow]);
-
-  const handleLoadMore = () => {
-    setItemsToShow(prev => prev + ITEMS_PER_PAGE);
-  };
+  const displayedItems = filteredHistory.slice(0, itemsToShow);
 
   const toggleSelection = (id: string, docType: string) => {
       if (selectedIds.includes(id)) {
           setSelectedIds(prev => prev.filter(item => item !== id));
       } else {
-          if (selectedIds.length < 2) {
-              if (selectedIds.length === 1) {
-                  const firstItem = history.find(h => h.id === selectedIds[0]);
-                  if (firstItem && firstItem.summary.document_type !== docType) {
-                      alert("Para comparar, selecione documentos do mesmo tipo.");
-                      return;
-                  }
+          // Check consistency: Consolidation requires same DocType (ideally DRE)
+          if (selectedIds.length > 0) {
+              const firstItem = history.find(h => h.id === selectedIds[0]);
+              if (firstItem && firstItem.summary.document_type !== docType) {
+                  alert("Para comparar ou consolidar, selecione documentos do mesmo tipo (ex: Todos DRE).");
+                  return;
               }
-              setSelectedIds(prev => [...prev, id]);
-          } else {
-              alert("Selecione apenas 2 itens para comparação.");
           }
-      }
-  };
-
-  const executeComparison = () => {
-      if (selectedIds.length !== 2 || !onCompare) return;
-      
-      // Fetch objects from history array (still lightweight/summary mostly)
-      // The parent component (App.tsx) handles fetching the 'fullResult' via its onCompare handler logic
-      const item1 = history.find(h => h.id === selectedIds[0]);
-      const item2 = history.find(h => h.id === selectedIds[1]);
-      
-      if (item1 && item2) {
-          const sorted = [item1, item2].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-          onCompare(sorted[0], sorted[1]);
-          onClose();
+          setSelectedIds(prev => [...prev, id]);
       }
   };
 
   const handleItemClick = (item: HistoryItem) => {
-      if (isCompareMode) {
+      if (isSelectionMode) {
           toggleSelection(item.id, item.summary.document_type);
       } else {
-          // This triggers the parent to load the full result
-          onSelect(item); 
-          onClose();
+          onSelect(item);
+      }
+  };
+
+  const handleAction = (action: 'compare' | 'consolidate') => {
+      if (action === 'compare') {
+          if (selectedIds.length !== 2) return;
+          const i1 = history.find(h => h.id === selectedIds[0]);
+          const i2 = history.find(h => h.id === selectedIds[1]);
+          if (i1 && i2 && onCompare) {
+              const sorted = [i1, i2].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+              onCompare(sorted[0], sorted[1]);
+          }
+      } else if (action === 'consolidate') {
+          if (selectedIds.length < 2) return;
+          const items = selectedIds.map(id => history.find(h => h.id === id)).filter(Boolean) as HistoryItem[];
+          if (onConsolidate) onConsolidate(items);
       }
   };
 
   return (
-    <div className={`fixed inset-0 z-50 overflow-hidden transition-all duration-300 ${isOpen ? 'pointer-events-auto' : 'pointer-events-none'}`}>
+    <div className={`fixed inset-0 z-50 transition-all duration-300 ${isOpen ? 'visible' : 'invisible'}`}>
       <div 
-        className={`absolute inset-0 bg-slate-900/50 backdrop-blur-sm transition-opacity duration-300 ${isOpen ? 'opacity-100' : 'opacity-0'}`}
+        className={`absolute inset-0 bg-slate-900/60 backdrop-blur-sm transition-opacity duration-300 ${isOpen ? 'opacity-100' : 'opacity-0'}`}
         onClick={onClose}
       />
 
-      <div className={`absolute inset-y-0 right-0 max-w-md w-full bg-white dark:bg-slate-800 shadow-2xl flex flex-col transition-transform duration-300 ease-in-out ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}>
-        <div className="px-6 py-4 bg-slate-100 dark:bg-slate-900 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-slate-800 dark:text-white flex items-center">
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 mr-2 text-blue-600 dark:text-blue-400">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-            Histórico
-          </h2>
-          <button onClick={onClose} className="text-slate-500 dark:text-slate-400 hover:text-slate-700 dark:hover:text-white p-2 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-full transition-colors">
-            ✕
+      <div className={`absolute inset-y-0 right-0 max-w-md w-full bg-slate-50 dark:bg-slate-900 shadow-2xl flex flex-col transition-transform duration-300 ease-in-out ${isOpen ? 'translate-x-0' : 'translate-x-full'}`}>
+        
+        {/* HEADER */}
+        <div className="px-6 py-5 bg-white dark:bg-slate-800 border-b dark:border-slate-700 flex items-center justify-between">
+          <div>
+            <h2 className="text-xl font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                <svg className="w-5 h-5 text-blue-600" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                Histórico de Auditoria
+            </h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Gerencie e compare suas análises salvas</p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-full transition-colors">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
           </button>
         </div>
         
-        <div className="px-4 pt-4 bg-slate-50 dark:bg-slate-800/50">
-            <div className="flex items-center justify-between mb-3">
-                <label className="flex items-center cursor-pointer select-none">
-                    <div className="relative">
-                        <input type="checkbox" className="sr-only" checked={isCompareMode} onChange={e => { setIsCompareMode(e.target.checked); setSelectedIds([]); }} />
-                        <div className={`block w-10 h-6 rounded-full transition-colors ${isCompareMode ? 'bg-purple-600' : 'bg-slate-300'}`}></div>
-                        <div className={`dot absolute left-1 top-1 bg-white w-4 h-4 rounded-full transition-transform ${isCompareMode ? 'transform translate-x-4' : ''}`}></div>
-                    </div>
-                    <span className="ml-2 text-sm font-bold text-slate-700 dark:text-slate-300">Modo Comparação</span>
-                </label>
-                {isCompareMode && selectedIds.length === 2 && (
-                    <button onClick={executeComparison} className="bg-purple-600 text-white text-xs px-3 py-1.5 rounded-full font-bold animate-pulse">
-                        Comparar (2)
-                    </button>
-                )}
+        {/* SEARCH AND FILTERS */}
+        <div className="p-4 bg-white dark:bg-slate-800 border-b dark:border-slate-700 space-y-4">
+            <div className="relative">
+                <input 
+                    type="text" 
+                    placeholder="Filtrar por empresa, tipo ou arquivo..." 
+                    value={searchTerm} 
+                    onChange={(e) => setSearchTerm(e.target.value)} 
+                    className="w-full pl-10 pr-4 py-2 bg-slate-100 dark:bg-slate-900 border-transparent focus:bg-white dark:focus:bg-slate-800 focus:ring-2 focus:ring-blue-500 rounded-xl text-sm transition-all" 
+                />
+                <svg className="w-4 h-4 text-slate-400 absolute left-3.5 top-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
             </div>
 
-            <div className="flex bg-slate-200 dark:bg-slate-700 rounded-lg p-1 mb-3">
-                <button onClick={() => setViewMode('all')} className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${viewMode === 'all' ? 'bg-white dark:bg-slate-600 text-blue-600 dark:text-blue-300 shadow-sm' : 'text-slate-500'}`}>Todas</button>
-                <button onClick={() => setViewMode('mine')} disabled={!currentUser} className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${viewMode === 'mine' ? 'bg-white dark:bg-slate-600 text-blue-600 dark:text-blue-300 shadow-sm' : 'text-slate-500 disabled:opacity-40'}`}>Meus Relatórios</button>
-            </div>
-            
-            <div className="relative mb-2">
-                <input type="text" placeholder="Filtrar por empresa ou data..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full pl-3 pr-4 py-2 border border-slate-300 dark:border-slate-600 dark:bg-slate-700 dark:text-white rounded-lg text-sm" />
+            <div className="flex gap-2">
+                <div className="flex bg-slate-100 dark:bg-slate-900 rounded-lg p-1 flex-1">
+                    <button 
+                        onClick={() => setViewMode('all')} 
+                        className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${viewMode === 'all' ? 'bg-white dark:bg-slate-800 text-blue-600 shadow-sm' : 'text-slate-500'}`}
+                    >
+                        Todas
+                    </button>
+                    <button 
+                        onClick={() => setViewMode('mine')} 
+                        disabled={!currentUser}
+                        className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-all ${viewMode === 'mine' ? 'bg-white dark:bg-slate-800 text-blue-600 shadow-sm' : 'text-slate-500 disabled:opacity-40'}`}
+                    >
+                        Minhas
+                    </button>
+                </div>
+                
+                <button 
+                    onClick={() => { setIsSelectionMode(!isSelectionMode); setSelectedIds([]); }}
+                    className={`px-4 py-1.5 text-xs font-bold rounded-lg border transition-all ${
+                        isSelectionMode ? 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-500/30' : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-600 dark:text-slate-300'
+                    }`}
+                >
+                    {isSelectionMode ? 'Cancelar Seleção' : 'Selecionar'}
+                </button>
             </div>
         </div>
 
-        <div className="flex-1 overflow-y-auto p-4 bg-slate-50 dark:bg-slate-800/50">
-          {history.length === 0 ? (
-            <div className="text-center py-12 text-slate-500 dark:text-slate-400"><p>Nenhuma análise salva.</p></div>
-          ) : filteredHistory.length === 0 ? (
-             <div className="text-center py-12 text-slate-500 dark:text-slate-400"><p>Nenhum resultado encontrado.</p></div>
+        {/* LIST */}
+        <div className="flex-1 overflow-y-auto p-4 space-y-3">
+          {filteredHistory.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-20 text-center px-6">
+                <div className="w-16 h-16 bg-slate-100 dark:bg-slate-800 rounded-full flex items-center justify-center mb-4">
+                    <svg className="w-8 h-8 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" /></svg>
+                </div>
+                <h3 className="text-slate-800 dark:text-white font-bold">Nenhuma análise encontrada</h3>
+                <p className="text-sm text-slate-500 mt-1">Realize uma nova análise para vê-la aqui ou altere seus filtros.</p>
+            </div>
           ) : (
-            <div className="space-y-3">
+            <>
               {displayedItems.map((item) => (
                 <HistoryListItem 
                     key={item.id} 
                     item={item} 
                     isSelected={selectedIds.includes(item.id)} 
-                    isCompareMode={isCompareMode} 
+                    isSelectionMode={isSelectionMode} 
                     onClick={() => handleItemClick(item)}
+                    onDelete={(e) => {
+                        e.stopPropagation();
+                        if(confirm('Tem certeza que deseja excluir esta análise permanentemente?')) {
+                            onDeleteItem?.(item.id);
+                        }
+                    }}
                 />
               ))}
               
               {filteredHistory.length > itemsToShow && (
-                  <button onClick={handleLoadMore} className="w-full py-2 bg-slate-200 dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded font-medium text-sm hover:bg-slate-300 dark:hover:bg-slate-600 transition-colors">
-                    Carregar mais...
-                  </button>
+                <button 
+                    onClick={() => setItemsToShow(prev => prev + ITEMS_PER_PAGE)}
+                    className="w-full py-3 text-sm font-bold text-blue-600 hover:text-blue-700 hover:bg-blue-50 dark:hover:bg-blue-900/10 rounded-xl transition-all"
+                >
+                    Carregar mais registros
+                </button>
               )}
-            </div>
+            </>
           )}
         </div>
 
-        {!isCompareMode && history.length > 0 && (
-          <div className="p-4 bg-slate-100 dark:bg-slate-900 border-t border-slate-200 dark:border-slate-700">
-            <button onClick={onClear} className="w-full py-2 px-4 bg-white dark:bg-slate-800 border border-red-200 dark:border-red-800 text-red-600 dark:text-red-400 hover:bg-red-50 rounded-md text-sm font-medium transition-colors">
-              Limpar Cache
-            </button>
-          </div>
-        )}
+        {/* FOOTER ACTIONS */}
+        <div className="p-4 bg-white dark:bg-slate-800 border-t dark:border-slate-700">
+            {isSelectionMode ? (
+                <div className="space-y-3">
+                     <div className="grid grid-cols-2 gap-2">
+                        <button 
+                            onClick={() => handleAction('compare')}
+                            disabled={selectedIds.length !== 2}
+                            className={`py-3 px-2 rounded-xl font-bold text-xs shadow-lg transition-all border ${
+                                selectedIds.length === 2 
+                                ? 'bg-white text-blue-600 border-blue-200 hover:bg-blue-50' 
+                                : 'bg-slate-100 text-slate-400 border-transparent cursor-not-allowed'
+                            }`}
+                        >
+                            Comparar Horizontal (2)
+                        </button>
+                        <button 
+                            onClick={() => handleAction('consolidate')}
+                            disabled={selectedIds.length < 2}
+                            className={`py-3 px-2 rounded-xl font-bold text-xs shadow-lg transition-all ${
+                                selectedIds.length >= 2 
+                                ? 'bg-purple-600 text-white hover:bg-purple-700 shadow-purple-500/20' 
+                                : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                            }`}
+                        >
+                            Aglutinar / Consolidar ({selectedIds.length})
+                        </button>
+                    </div>
+                </div>
+            ) : (
+                <div className="flex gap-2">
+                    <button 
+                        onClick={onClear} 
+                        className="flex-1 py-2.5 px-4 bg-red-50 dark:bg-red-900/10 text-red-600 border border-red-100 dark:border-red-900/30 hover:bg-red-100 rounded-xl text-xs font-bold transition-all"
+                    >
+                        Limpar Tudo
+                    </button>
+                    <button 
+                        onClick={onClose} 
+                        className="flex-1 py-2.5 px-4 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 hover:bg-slate-200 rounded-xl text-xs font-bold transition-all"
+                    >
+                        Fechar
+                    </button>
+                </div>
+            )}
+        </div>
       </div>
     </div>
   );

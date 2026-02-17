@@ -1,868 +1,726 @@
+
 import React, { useState, useMemo, useEffect } from 'react';
 import { AnalysisResult, ExtractedAccount, HeaderData } from '../types';
 import { generateFinancialInsight, generateCMVAnalysis, generateSpedComplianceCheck } from '../services/geminiService';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, Cell } from 'recharts';
 
 interface Props {
   result: AnalysisResult;
   headerData: HeaderData;
   previousAccounts?: ExtractedAccount[];
+  analysisTimestamp?: string | null;
 }
 
-type SortKey = keyof ExtractedAccount;
-
-interface TableTheme {
-    name: string;
-    headerBg: string;
-    headerText: string;
-    rowOddBg: string;
-    rowEvenBg: string;
-    border: string;
-}
-
-const DEFAULT_THEMES: TableTheme[] = [
-    { name: 'Padrão (Slate)', headerBg: '#f1f5f9', headerText: '#64748b', rowOddBg: '#ffffff', rowEvenBg: '#f8fafc', border: '#e2e8f0' },
-    { name: 'Ocean (Azul)', headerBg: '#e0f2fe', headerText: '#0369a1', rowOddBg: '#ffffff', rowEvenBg: '#f0f9ff', border: '#bae6fd' },
-    { name: 'Forest (Verde)', headerBg: '#dcfce7', headerText: '#15803d', rowOddBg: '#ffffff', rowEvenBg: '#f0fdf4', border: '#bbf7d0' },
-    { name: 'Classic (Cinza)', headerBg: '#e5e7eb', headerText: '#374151', rowOddBg: '#ffffff', rowEvenBg: '#f3f4f6', border: '#d1d5db' },
-];
-
-const TABLE_THEME_KEY = 'auditAI_table_theme';
-const DEFAULT_EBITDA_MULTIPLE_KEY = 'auditAI_default_ebitda_multiple';
-
-const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts }) => {
-  const [sortConfig, setSortConfig] = useState<{ key: SortKey; direction: 'asc' | 'desc' } | null>(null);
+const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts, analysisTimestamp }) => {
   const [searchTerm, setSearchTerm] = useState('');
-  const [isTableLoading, setIsTableLoading] = useState(true);
+  const [viewTab, setViewTab] = useState<'dashboard' | 'bp' | 'dre' | 'list'>('dashboard');
+  const [activeOpinionTab, setActiveOpinionTab] = useState<'financial' | 'costs' | 'compliance'>('financial');
   
-  // Theme State
-  const [showThemeSettings, setShowThemeSettings] = useState(false);
-  const [customTheme, setCustomTheme] = useState<TableTheme>(DEFAULT_THEMES[0]);
+  const formattedDate = analysisTimestamp 
+    ? new Date(analysisTimestamp).toLocaleString('pt-BR', { dateStyle: 'long', timeStyle: 'medium' })
+    : new Date().toLocaleString('pt-BR', { dateStyle: 'long', timeStyle: 'medium' });
 
-  useEffect(() => {
-    const saved = localStorage.getItem(TABLE_THEME_KEY);
-    if (saved) {
-        try {
-            setCustomTheme(JSON.parse(saved));
-        } catch (e) {
-            console.error("Failed to load theme", e);
-        }
-    }
-  }, []);
-
-  const applyTheme = (theme: TableTheme) => {
-      setCustomTheme(theme);
-      localStorage.setItem(TABLE_THEME_KEY, JSON.stringify(theme));
-      setShowThemeSettings(false);
-  };
-
-  const [expandedIFRSCategories, setExpandedIFRSCategories] = useState<{
-      Operacional: boolean;
-      Investimento: boolean;
-      Financiamento: boolean;
-  }>({ Operacional: true, Investimento: false, Financiamento: false });
-
-  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
-  
-  useEffect(() => {
-      if (result.accounts) {
-          const allSyntheticCodes = result.accounts.filter(a => a.is_synthetic && a.account_code).map(a => a.account_code!);
-          setExpandedGroups(new Set(allSyntheticCodes));
-      }
-      if (result.summary.document_type === 'DRE') {
-          setExpandedIFRSCategories({ Operacional: true, Investimento: true, Financiamento: true });
-      }
-  }, [result]);
-
-  const [isValuationExpanded, setIsValuationExpanded] = useState(false);
-  const [isChartExpanded, setIsChartExpanded] = useState(true);
-  const [currentPage, setCurrentPage] = useState(1);
-  const [itemsPerPage] = useState(100);
-
-  const [filterType, setFilterType] = useState<'All' | 'Debit' | 'Credit'>('All');
-  const [filterMinVal, setFilterMinVal] = useState<string>('');
-  const [filterMaxVal, setFilterMaxVal] = useState<string>('');
-  const [filterInversion, setFilterInversion] = useState<'all' | 'yes' | 'no'>('all');
-  const [filterHasCorrection, setFilterHasCorrection] = useState(false);
-  
-  const [showCorrectedNames, setShowCorrectedNames] = useState(false);
-  const [showSuggestionCol, setShowSuggestionCol] = useState(false);
-
-  // Valuation & Insight State
-  const [insightPrompt, setInsightPrompt] = useState('Calcular EBITDA detalhado com base nos dados extraídos e estimar Valuation.');
-  const [valuationMultiple, setValuationMultiple] = useState(() => {
-    try { const saved = localStorage.getItem(DEFAULT_EBITDA_MULTIPLE_KEY); return saved ? parseFloat(saved) : 5; } catch { return 5; }
-  });
-  const [accountingStandard, setAccountingStandard] = useState('IFRS 18 / CPC Brasil');
-  
-  const [ebitdaResult, setEbitdaResult] = useState<string>('');
-  
-  const [isEbitdaLoading, setIsEbitdaLoading] = useState(false);
+  const [opinions, setOpinions] = useState({ financial: '', costs: '', compliance: '' });
+  const [loadingOpinions, setLoadingOpinions] = useState({ financial: false, costs: false, compliance: false });
 
   const formatCurrency = (value: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
 
-  const handleGenerateEBITDA = async () => {
-    if (!result) return;
-    setIsEbitdaLoading(true);
-    try {
-        const text = await generateFinancialInsight(result, insightPrompt, valuationMultiple, accountingStandard);
-        setEbitdaResult(text);
-    } catch (e) {
-        setEbitdaResult("Erro ao gerar análise. Verifique se a chave de API é válida.");
-    } finally {
-        setIsEbitdaLoading(false);
-    }
-  };
-
   const { summary, accounts = [], spell_check = [] } = result || {};
 
-  const invertedAccounts = useMemo(() => {
-      return accounts.filter(a => a.possible_inversion && !a.is_synthetic);
-  }, [accounts]);
-
-  // --- BALANCE SHEET CHART DATA ---
-  const balanceSheetChartData = useMemo(() => {
-      if (summary.document_type !== 'Balanço Patrimonial' || accounts.length === 0) return null;
-
-      // Helpers to sum accounts starting with a code prefix
-      const sumByPrefix = (prefix: string) => accounts
-          .filter(a => a.account_code?.startsWith(prefix) && a.level === 2) // Level 2 usually captures groups like 1.1, 1.2
-          .reduce((sum, a) => sum + a.final_balance, 0);
-        
-      // Fallback: search by name if codes are weird
-      const sumByName = (keywords: string[]) => accounts
-          .filter(a => !a.is_synthetic && keywords.some(k => a.account_name.toLowerCase().includes(k)))
-          .reduce((sum, a) => sum + a.final_balance, 0);
-
-      // Attempt Code Extraction First (Standard Plan of Accounts)
-      let ac = sumByPrefix('1.1');
-      let anc = sumByPrefix('1.2');
-      let pc = sumByPrefix('2.1');
-      let pnc = sumByPrefix('2.2');
-      let pl = sumByPrefix('2.3');
-
-      // If zeros, try keywords (fallback)
-      if (ac === 0 && anc === 0) {
-          ac = sumByName(['ativo circulante']);
-          anc = sumByName(['não circulante', 'realizável a longo prazo', 'imobilizado', 'intangível']);
-          pc = sumByName(['passivo circulante']);
-          pnc = sumByName(['passivo não circulante', 'exigível a longo prazo']);
-          pl = sumByName(['patrimônio líquido', 'capital social', 'lucros acumulados']);
-      }
-
-      // Ensure positive values for visualization
-      return [
-          {
-              name: 'Ativo',
-              Circulante: Math.abs(ac),
-              NaoCirculante: Math.abs(anc),
-          },
-          {
-              name: 'Passivo + PL',
-              Circulante: Math.abs(pc),
-              NaoCirculante: Math.abs(pnc),
-              PatrimonioLiquido: Math.abs(pl)
-          }
-      ];
-  }, [summary.document_type, accounts]);
-
-  // --- GENERAL CHART DATA PREPARATION ---
-  const chartData = useMemo(() => {
-      if (!accounts || accounts.length === 0) return [];
-      const analytical = accounts.filter(a => !a.is_synthetic);
-      const topAccounts = analytical
-          .sort((a, b) => Math.abs(b.final_balance) - Math.abs(a.final_balance))
-          .slice(0, 5);
-      if (topAccounts.length === 0) return [];
-      return topAccounts.map(acc => ({
-          name: acc.account_name.length > 15 ? acc.account_name.substring(0, 15) + '...' : acc.account_name,
-          fullName: acc.account_name,
-          initial: typeof acc.initial_balance === 'number' ? acc.initial_balance : 0,
-          final: typeof acc.final_balance === 'number' ? acc.final_balance : 0
-      }));
-  }, [accounts]);
-
-  const finalResultValue = useMemo(() => {
-      if (summary?.specific_result_value !== undefined) return summary.specific_result_value;
-      return summary ? summary.total_credits - summary.total_debits : 0;
-  }, [summary]);
-
-  const finalResultLabel = useMemo(() => {
-      if (summary?.specific_result_label) return summary.specific_result_label;
-      return finalResultValue >= 0 ? 'LUCRO / SUPERÁVIT' : 'PREJUÍZO / DÉFICIT';
-  }, [summary, finalResultValue]);
-
-  const profitLossStyle = useMemo(() => finalResultValue >= 0 
-      ? { text: 'text-blue-700 dark:text-blue-300', bg: 'bg-blue-50 dark:bg-blue-900/20', border: 'border-blue-200 dark:border-blue-800' }
-      : { text: 'text-red-700 dark:text-red-300', bg: 'bg-red-50 dark:bg-red-900/20', border: 'border-red-200 dark:border-red-800' }, [finalResultValue]);
-
-  const getDisplayedName = (account: ExtractedAccount) => {
-      let correctedName = account.account_name;
-      spell_check.forEach(sc => {
-          if (sc.confidence !== 'Low') {
-              const escapedOriginal = sc.original_term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-              const regex = new RegExp(escapedOriginal, 'gi');
-              correctedName = correctedName.replace(regex, sc.suggested_correction);
-          }
-      });
-      return correctedName;
-  };
+  // --- LOGIC: STRUCTURE BUILDER ---
   
-  const getSuggestionForAccount = (account: ExtractedAccount) => {
-      const corrected = getDisplayedName(account);
-      return corrected !== account.account_name ? corrected : null;
-  };
+  const financialStructure = useMemo(() => {
+      const activeData = accounts.filter(a => !a.is_synthetic);
 
-  useEffect(() => { setIsTableLoading(true); setTimeout(() => setIsTableLoading(false), 600); }, [result]);
-  useEffect(() => setCurrentPage(1), [searchTerm, filterType, filterMinVal, filterMaxVal, filterInversion, filterHasCorrection]);
-
-  const filteredAndSortedAccounts = useMemo(() => {
-    if (!accounts) return [];
-    let processedAccounts = accounts.map((acc, index) => ({ ...acc, originalIndex: index }));
-
-    if (searchTerm) {
-        const s = searchTerm.toLowerCase();
-        processedAccounts = processedAccounts.filter(a => a.account_name.toLowerCase().includes(s) || (a.account_code && a.account_code.toLowerCase().includes(s)));
-    }
-    if (filterType !== 'All') processedAccounts = processedAccounts.filter(acc => acc.type === filterType);
-    if (filterMinVal && !isNaN(parseFloat(filterMinVal))) processedAccounts = processedAccounts.filter(acc => Math.max(acc.debit_value, acc.credit_value) >= parseFloat(filterMinVal));
-    if (filterMaxVal && !isNaN(parseFloat(filterMaxVal))) processedAccounts = processedAccounts.filter(acc => Math.max(acc.debit_value, acc.credit_value) <= parseFloat(filterMaxVal));
-    if (filterInversion !== 'all') processedAccounts = processedAccounts.filter(acc => filterInversion === 'yes' ? acc.possible_inversion : !acc.possible_inversion);
-    if (filterHasCorrection) processedAccounts = processedAccounts.filter(acc => getSuggestionForAccount(acc) !== null);
-
-    if (!searchTerm && filterType === 'All' && !filterMinVal && !filterInversion && !filterHasCorrection) {
-        processedAccounts = processedAccounts.filter(acc => {
-            if (!acc.account_code) return true;
-            const parts = acc.account_code.split(/[.-]/);
-            if (parts.length <= 1) return true; 
-            
-            let currentPath = parts[0];
-            for (let i = 1; i < parts.length; i++) {
-                if (!expandedGroups.has(currentPath)) return false;
-                currentPath += (acc.account_code.includes('-') ? '-' : '.') + parts[i];
-            }
-            return true;
-        });
-    }
-
-    if (sortConfig) {
-      processedAccounts.sort((a, b) => {
-        let aVal: any = a[sortConfig.key] || '', bVal: any = b[sortConfig.key] || '';
-        if (typeof aVal === 'boolean') { aVal = aVal ? 1 : 0; bVal = bVal ? 1 : 0; }
-        return aVal < bVal ? (sortConfig.direction === 'asc' ? -1 : 1) : (sortConfig.direction === 'asc' ? 1 : -1);
-      });
-    }
-    return processedAccounts;
-  }, [accounts, sortConfig, searchTerm, filterType, filterMinVal, filterMaxVal, filterInversion, filterHasCorrection, expandedGroups, showCorrectedNames]);
-
-  const paginatedAccounts = useMemo(() => filteredAndSortedAccounts.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage), [filteredAndSortedAccounts, currentPage, itemsPerPage]);
-  const requestSort = (key: SortKey) => setSortConfig({ key, direction: sortConfig?.key === key && sortConfig.direction === 'asc' ? 'desc' : 'asc' });
-
-  // IFRS Logic
-  const ifrsGroups = useMemo(() => {
-      const groups = { Operacional: [] as ExtractedAccount[], Investimento: [] as ExtractedAccount[], Financiamento: [] as ExtractedAccount[] };
-      accounts.forEach(acc => {
-          if (acc.ifrs18_category === 'Operacional') groups.Operacional.push(acc);
-          else if (acc.ifrs18_category === 'Investimento') groups.Investimento.push(acc);
-          else if (acc.ifrs18_category === 'Financiamento') groups.Financiamento.push(acc);
-      });
-      return groups;
-  }, [accounts]);
-  
-  const hasIFRSData = ifrsGroups.Operacional.length + ifrsGroups.Investimento.length + ifrsGroups.Financiamento.length > 0;
-  
-  const toggleIFRSCategory = (cat: keyof typeof expandedIFRSCategories) => setExpandedIFRSCategories(prev => ({ ...prev, [cat]: !prev[cat] }));
-  const expandAllIFRS = () => { if(hasIFRSData) setExpandedIFRSCategories({ Operacional: true, Investimento: true, Financiamento: true }); };
-  const collapseAllIFRS = () => { if(hasIFRSData) setExpandedIFRSCategories({ Operacional: false, Investimento: false, Financiamento: false }); };
-
-  // --- ROBUST PDF GENERATOR (SAFARI FIX) ---
-  const generatePDFDocument = () => {
-      const doc = new jsPDF();
-      const pageWidth = doc.internal.pageSize.getWidth();
-      const pageHeight = doc.internal.pageSize.getHeight();
-      
-      // Execute autoTable with fallback checks
-      const runAutoTable = (options: any) => {
-          if (typeof autoTable === 'function') {
-              autoTable(doc, options);
-          } else if (autoTable && typeof (autoTable as any).default === 'function') {
-              (autoTable as any).default(doc, options);
-          } else if (typeof (doc as any).autoTable === 'function') {
-              (doc as any).autoTable(options);
-          } else {
-              console.error("AutoTable not loaded", autoTable);
-              throw new Error("Plugin de Tabela PDF não disponível");
-          }
+      // Helper to match account by code OR name keywords
+      const match = (acc: ExtractedAccount, codes: string[], terms: string[]) => {
+          const c = acc.account_code || '';
+          const n = acc.account_name.toLowerCase();
+          return codes.some(prefix => c.startsWith(prefix)) || terms.some(term => n.includes(term));
       };
 
-      const printHeader = (title: string) => {
-          doc.setFillColor(30, 64, 175);
-          doc.rect(0, 0, pageWidth, 25, 'F');
-          doc.setTextColor(255, 255, 255);
-          doc.setFontSize(16);
-          doc.text(title, 14, 16);
-          doc.setFontSize(9);
-          doc.text('Relatório Gerado por AuditAI - Inteligência Contábil', 14, 21);
-          
-          doc.setTextColor(50, 50, 50);
-          doc.setFontSize(10);
+      // --- BALANÇO PATRIMONIAL ---
+      const balanco = {
+          ativoCirculante: activeData.filter(a => match(a, ['1.1'], ['circulante', 'caixa', 'banco', 'cliente', 'estoque', 'adiantamento'])),
+          ativoNaoCirculante: activeData.filter(a => match(a, ['1.2', '1.3', '1.4'], ['não circulante', 'nao circulante', 'imobilizado', 'intangivel', 'investimento'])),
+          passivoCirculante: activeData.filter(a => match(a, ['2.1'], ['circulante', 'fornecedor', 'imposto', 'salario', 'obrigação'])),
+          passivoNaoCirculante: activeData.filter(a => match(a, ['2.2'], ['não circulante', 'nao circulante', 'longo prazo', 'financiamento'])),
+          patrimonioLiquido: activeData.filter(a => match(a, ['2.3', '2.4'], ['patrimônio', 'patrimonio', 'capital', 'reservas', 'lucros acumulados', 'prejuízos acumulados']))
       };
 
-      printHeader('Resumo da Auditoria');
+      // Sums
+      const sum = (list: ExtractedAccount[]) => list.reduce((acc, item) => acc + Math.abs(item.final_balance), 0);
       
-      doc.setFontSize(11);
-      doc.text(`Empresa: ${headerData.companyName || 'N/D'}`, 14, 35);
-      doc.text(`CNPJ: ${headerData.cnpj || 'N/D'}`, 14, 41);
-      doc.text(`Período Base: ${summary.period || 'Não identificado'}`, 14, 47);
-      doc.text(`Data do Relatório: ${new Date().toLocaleDateString()}`, 14, 53);
-
-      let currentY = 60;
-
-      doc.setFontSize(12);
-      doc.setTextColor(30, 64, 175);
-      doc.text('1. Indicadores Chave', 14, currentY);
-      currentY += 5;
-
-      runAutoTable({
-          startY: currentY,
-          head: [['Indicador', 'Valor', 'Status']],
-          body: [
-              ['Total de Débitos', formatCurrency(summary.total_debits), ''],
-              ['Total de Créditos', formatCurrency(summary.total_credits), ''],
-              ['Resultado Apurado', formatCurrency(finalResultValue), finalResultValue >= 0 ? 'Lucro/Superávit' : 'Prejuízo/Déficit'],
-              ['Conformidade (Balancete)', summary.is_balanced ? 'Balanceado' : 'Divergente', summary.is_balanced ? 'OK' : formatCurrency(summary.discrepancy_amount)]
-          ],
-          theme: 'grid',
-          headStyles: { fillColor: [30, 64, 175] },
-          styles: { fontSize: 10, cellPadding: 4 }
-      });
-
-      const lastTable = (doc as any).lastAutoTable;
-      currentY = lastTable ? lastTable.finalY + 15 : currentY + 50;
-
-      doc.setFontSize(12);
-      doc.setTextColor(30, 64, 175);
-      doc.text('2. Parecer da Inteligência Artificial', 14, currentY);
-      currentY += 5;
-
-      const insightText = summary.observations.length > 0 
-          ? summary.observations.map(o => `• ${o}`).join('\n\n')
-          : "Nenhuma observação crítica detectada automaticamente.";
-
-      runAutoTable({
-          startY: currentY,
-          body: [[insightText]],
-          theme: 'plain',
-          styles: { fontSize: 10, cellPadding: 5, overflow: 'linebreak' },
-          showHead: 'never'
-      });
+      const bpTotals = {
+          ac: sum(balanco.ativoCirculante),
+          anc: sum(balanco.ativoNaoCirculante),
+          pc: sum(balanco.passivoCirculante),
+          pnc: sum(balanco.passivoNaoCirculante),
+          pl: sum(balanco.patrimonioLiquido)
+      };
       
-      const lastTable2 = (doc as any).lastAutoTable;
-      currentY = lastTable2 ? lastTable2.finalY + 15 : currentY + 40;
-
-      if (invertedAccounts.length > 0) {
-          doc.setFontSize(12);
-          doc.setTextColor(220, 38, 38);
-          doc.text(`3. Alertas de Inconsistência (${invertedAccounts.length})`, 14, currentY);
-          currentY += 5;
-
-          runAutoTable({
-              startY: currentY,
-              head: [['Código', 'Conta', 'Saldo', 'Natureza']],
-              body: invertedAccounts.map(acc => [acc.account_code, acc.account_name, formatCurrency(acc.final_balance), 'Invertida']),
-              theme: 'striped',
-              headStyles: { fillColor: [220, 38, 38] },
-          });
+      const totalAtivo = bpTotals.ac + bpTotals.anc;
+      const totalPassivo = bpTotals.pc + bpTotals.pnc + bpTotals.pl;
+      
+      if (bpTotals.pl === 0 && Math.abs(totalAtivo - totalPassivo) > 1) {
+          bpTotals.pl = totalAtivo - (bpTotals.pc + bpTotals.pnc);
       }
 
-      doc.addPage();
-      printHeader('Detalhamento Analítico de Contas');
+      // --- DRE (INCOME STATEMENT) ---
+      const dre = {
+          receitaBruta: activeData.filter(a => (a.account_code?.startsWith('3.1') || match(a, [], ['receita bruta', 'venda de', 'faturamento', 'serviços prestados'])) && a.type === 'Credit'),
+          deducoes: activeData.filter(a => match(a, [], ['imposto sobre', 'devoluç', 'cancelamento', 'abatimento']) || (a.account_name.includes('Simples') && a.type === 'Debit')),
+          custos: activeData.filter(a => match(a, ['3.2', '3.3'], ['custo', 'cmv', 'cpv', 'csv'])),
+          despesasOp: activeData.filter(a => (a.account_code?.startsWith('3') || a.account_code?.startsWith('4')) && match(a, ['4'], ['despesa', 'salário', 'aluguel', 'energia', 'água', 'luz', 'telefone', 'honorários', 'pro labore']) && !match(a, [], ['custo', 'cmv', 'imposto sobre', 'financeir'])),
+          financeiro: activeData.filter(a => match(a, [], ['juros', 'financeira', 'bancária', 'iof', 'desconto', 'variação cambial']))
+      };
+
+      const dreTotals = {
+          receitaBruta: sum(dre.receitaBruta),
+          deducoes: sum(dre.deducoes),
+          custos: sum(dre.custos),
+          despesas: sum(dre.despesasOp),
+          financeiro: sum(dre.financeiro)
+      };
       
-      const tableData = accounts.filter(a => !a.is_synthetic).map(a => [
-          a.account_code || '',
-          a.account_name,
-          a.type === 'Debit' ? 'Débito' : 'Crédito', // Added Type column
-          formatCurrency(a.initial_balance),
-          formatCurrency(a.debit_value),
-          formatCurrency(a.credit_value),
-          formatCurrency(a.final_balance)
-      ]);
+      const recLiq = dreTotals.receitaBruta - dreTotals.deducoes;
+      const lucroBruto = recLiq - dreTotals.custos;
+      const resultadoOp = lucroBruto - dreTotals.despesas - dreTotals.financeiro;
 
-      runAutoTable({
-          startY: 35,
-          head: [['Código', 'Descrição da Conta', 'Tipo', 'Saldo Ant.', 'Débitos', 'Créditos', 'Saldo Atual']],
-          body: tableData,
-          theme: 'striped',
-          headStyles: { fillColor: [50, 50, 50] },
-          styles: { fontSize: 8, cellPadding: 2 },
-          columnStyles: {
-              0: { cellWidth: 20 },
-              1: { cellWidth: 'auto' },
-              2: { cellWidth: 15, halign: 'center' },
-              3: { cellWidth: 25, halign: 'right' },
-              4: { cellWidth: 25, halign: 'right' },
-              5: { cellWidth: 25, halign: 'right' },
-              6: { cellWidth: 25, halign: 'right' }
-          },
-          didDrawPage: (data: any) => {
-              const str = 'Página ' + doc.internal.getNumberOfPages();
-              doc.setFontSize(8);
-              doc.text(str, pageWidth - 30, pageHeight - 10);
-          }
-      });
+      return { balanco, bpTotals, dre, dreTotals, calculatedResult: resultadoOp };
+  }, [accounts]);
 
-      return doc;
-  };
+  // --- ACTIONS ---
 
-  const handleDownloadPDF = () => {
-      const doc = generatePDFDocument();
-      const fileName = `AuditAI_${(headerData.companyName || 'Relatorio').replace(/\s+/g, '_')}_${new Date().toISOString().slice(0,10)}.pdf`;
-
-      // HYBRID DOWNLOAD STRATEGY
-      try {
-          // Attempt 1: Standard .save() - Best for Chrome/Edge/Firefox
-          doc.save(fileName);
-      } catch (e) {
-          console.warn("PDF Save failed, trying fallback...", e);
-          // Attempt 2: Open in new window (Best for Safari/iOS to avoid WebKitBlobResource error)
-          try {
-              const blob = doc.output('blob');
-              const url = URL.createObjectURL(blob);
-              const newWindow = window.open(url, '_blank');
-              if (!newWindow) {
-                  alert("Pop-up bloqueado. Permita pop-ups para visualizar o PDF.");
-              }
-              // Cleanup after delay
-              setTimeout(() => URL.revokeObjectURL(url), 60000);
-          } catch (e2) {
-              alert("Erro ao gerar PDF.");
-          }
-      }
-  };
-  
-  const handlePrint = () => {
-      window.print();
-  };
+  const handlePrint = () => window.print();
 
   const handleShare = async () => {
-      const fileName = `AuditAI_${(headerData.companyName || 'Relatorio').replace(/\s+/g, '_')}.pdf`;
-      const doc = generatePDFDocument();
-      const blob = doc.output('blob');
-      const file = new File([blob], fileName, { type: 'application/pdf' });
-
-      // 1. Try Native Web Share API (Safari/Mobile)
-      if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
-          try {
-              await navigator.share({
-                  title: 'Relatório de Auditoria AuditAI',
-                  text: `Segue análise contábil de ${headerData.companyName}.\nResultado: ${finalResultValue >= 0 ? 'Lucro' : 'Prejuízo'} de ${formatCurrency(finalResultValue)}`,
-                  files: [file]
-              });
-              return;
-          } catch (e) {
-              console.log("Web Share API canceled or failed", e);
-          }
-      }
-
-      // 2. Fallback to Mailto (Desktop)
-      // Note: We cannot programmatically attach files to mailto due to browser security restrictions.
-      const subject = encodeURIComponent(`Relatório de Auditoria: ${headerData.companyName}`);
-      const body = encodeURIComponent(`Olá,\n\nSegue resumo da análise contábil:\n\nEmpresa: ${headerData.companyName}\nResultado: ${finalResultValue >= 0 ? 'Lucro' : 'Prejuízo'} de ${formatCurrency(finalResultValue)}\n\n*OBSERVAÇÃO:* Por favor, anexe manualmente o arquivo PDF que será baixado agora.`);
-      
-      // Trigger PDF download first so the user has the file
-      handleDownloadPDF();
-      
-      setTimeout(() => {
-          window.location.href = `mailto:?subject=${subject}&body=${body}`;
-          alert("O cliente de e-mail foi aberto. Por favor, anexe o PDF que foi baixado.");
-      }, 500);
-  };
-
-  const exportPDFContent = (title: string, content: string) => {
-      if (!content) return;
-      try {
-        const doc = new jsPDF();
-        doc.setFontSize(14);
-        doc.text(title, 14, 15);
-        doc.setFontSize(10);
-        const splitText = doc.splitTextToSize(content, 180);
-        doc.text(splitText, 14, 25);
-        doc.save(`${title.replace(/\s+/g, '_')}.pdf`);
-      } catch (err) {
-        alert("Erro ao exportar conteúdo.");
-      }
-  };
-
-  const handleExportIFRS = () => {
+    const shareData = {
+        title: `Auditoria: ${headerData.companyName}`,
+        text: `Relatório de Análise Contábil - SP Assessoria.\nEmpresa: ${headerData.companyName}\nOperador: ${headerData.collaboratorName}\nData: ${formattedDate}\nResultado: ${formatCurrency(financialStructure.calculatedResult)}`,
+        url: window.location.href
+    };
     try {
-        const doc = new jsPDF();
-        const runAutoTable = (options: any) => {
-          if (typeof autoTable === 'function') autoTable(doc, options);
-          else if (autoTable && typeof (autoTable as any).default === 'function') (autoTable as any).default(doc, options);
-          else if (typeof (doc as any).autoTable === 'function') (doc as any).autoTable(options);
-        };
+        if (navigator.share) await navigator.share(shareData);
+        else { await navigator.clipboard.writeText(shareData.text); alert("Dados copiados para a área de transferência!"); }
+    } catch (err) { console.error(err); }
+  };
 
-        doc.setFontSize(16);
-        doc.setTextColor(30, 64, 175);
-        doc.text('Relatório DRE - Visão IFRS 18', 14, 20);
+  // Shared Header Logic for PDFs
+  const drawPDFHeader = (doc: jsPDF, pageWidth: number) => {
+      doc.setFillColor(15, 23, 42); // Primary Color
+      doc.rect(0, 0, pageWidth, 40, 'F');
+      
+      doc.setTextColor(255, 255, 255);
+      doc.setFontSize(18);
+      doc.setFont("helvetica", "bold");
+      doc.text("SP ASSESSORIA CONTÁBIL", 14, 15);
+      
+      doc.setFontSize(10);
+      doc.setFont("helvetica", "normal");
+      doc.text(`Relatório de Auditoria Digital`, 14, 22);
+      
+      // Metadata Column 1
+      doc.text(`Cliente: ${headerData.companyName}`, 14, 30);
+      doc.text(`CNPJ: ${headerData.cnpj}`, 14, 35);
+
+      // Metadata Column 2 (Right Aligned context)
+      doc.text(`Emissão: ${formattedDate}`, 120, 30);
+      doc.text(`Operador: ${headerData.collaboratorName || 'Não Identificado'}`, 120, 35);
+  };
+
+  const handleExportPDF = () => {
+    const doc = new jsPDF();
+    const pageWidth = doc.internal.pageSize.width;
+
+    drawPDFHeader(doc, pageWidth);
+    
+    let y = 50;
+
+    // Summary Section
+    doc.setTextColor(0,0,0);
+    doc.setFontSize(12);
+    doc.setFont("helvetica", "bold");
+    doc.text("Resumo Executivo do Resultado (D.R.E.)", 14, y);
+    y += 10;
+
+    // Explicit DRE Columns as requested
+    const tableBody: any[] = [];
+    
+    const addSection = (title: string, items: ExtractedAccount[], total: number) => {
+        // Section Header
+        tableBody.push([{ 
+            content: title.toUpperCase(), 
+            colSpan: 4, 
+            styles: { fontStyle: 'bold', fillColor: [240, 240, 240], textColor: [0,0,0] } 
+        }]);
         
-        doc.setFontSize(10);
-        doc.setTextColor(100);
-        doc.text(`Empresa: ${headerData.companyName || 'Não Identificada'}`, 14, 30);
-        doc.text(`Período de Análise: ${summary.period || 'Indefinido'}`, 14, 36);
-
-        let currentY = 45;
-
-        Object.entries(ifrsGroups).forEach(([category, itemsRaw]) => {
-             const items = itemsRaw as ExtractedAccount[];
-             if (items.length === 0) return;
-             
-             const total = items.reduce((acc, curr) => acc + curr.total_value, 0);
-
-             if (currentY > 250) { doc.addPage(); currentY = 20; }
-             
-             doc.setFontSize(12);
-             doc.setTextColor(0);
-             doc.text(`${category} (Total: ${formatCurrency(total)})`, 14, currentY);
-             currentY += 4;
-
-             runAutoTable({
-                 startY: currentY,
-                 head: [['Código', 'Conta', 'Saldo']],
-                 body: items.map(i => [i.account_code || '', i.account_name, formatCurrency(i.total_value)]),
-                 theme: 'grid',
-                 headStyles: { fillColor: [67, 56, 202] }, // Indigo-700
-                 styles: { fontSize: 8, cellPadding: 2 },
-             });
-             
-             const lastTable = (doc as any).lastAutoTable;
-             currentY = lastTable ? lastTable.finalY + 10 : currentY + 30;
+        // Items
+        items.forEach(acc => {
+            tableBody.push([
+                acc.account_name,
+                acc.debit_value > 0 ? formatCurrency(acc.debit_value) : '-',
+                acc.credit_value > 0 ? formatCurrency(acc.credit_value) : '-',
+                { 
+                    content: formatCurrency(acc.final_balance), 
+                    styles: { textColor: acc.final_balance < 0 ? [220, 50, 50] : [0, 0, 0] } 
+                }
+            ]);
         });
         
-        doc.save(`DRE_IFRS_${(headerData.companyName || 'Relatorio').replace(/\s+/g, '_')}.pdf`);
+        // Section Total
+        tableBody.push([
+            { content: `Total ${title}`, colSpan: 3, styles: { fontStyle: 'bold', halign: 'right' } },
+            { content: formatCurrency(total), styles: { fontStyle: 'bold', fillColor: [245, 245, 245] } }
+        ]);
+    };
 
-    } catch (error) {
-        console.error("Error generating IFRS PDF", error);
-        alert("Erro ao gerar PDF IFRS.");
-    }
+    addSection('Receita Bruta', financialStructure.dre.receitaBruta, financialStructure.dreTotals.receitaBruta);
+    addSection('Deduções', financialStructure.dre.deducoes, -financialStructure.dreTotals.deducoes);
+    addSection('Custos (CMV)', financialStructure.dre.custos, -financialStructure.dreTotals.custos);
+    addSection('Despesas Operacionais', financialStructure.dre.despesasOp, -financialStructure.dreTotals.despesas);
+    addSection('Resultado Financeiro', financialStructure.dre.financeiro, -financialStructure.dreTotals.financeiro);
+    
+    // Final Result Row
+    tableBody.push([
+        { content: 'RESULTADO LÍQUIDO DO EXERCÍCIO', colSpan: 3, styles: { fillColor: [15, 23, 42], textColor: [255,255,255], fontStyle: 'bold', halign: 'right', fontSize: 10 } },
+        { content: formatCurrency(financialStructure.calculatedResult), styles: { fillColor: [15, 23, 42], textColor: [255,255,255], fontStyle: 'bold', fontSize: 10 } }
+    ]);
+
+    autoTable(doc, {
+        startY: y,
+        head: [['Conta / Descrição', 'Débito', 'Crédito', 'Lucro/Prejuízo']],
+        body: tableBody,
+        theme: 'grid',
+        headStyles: { fillColor: [37, 99, 235], halign: 'center' },
+        styles: { fontSize: 8, cellPadding: 2 },
+        columnStyles: {
+            0: { cellWidth: 'auto' },
+            1: { cellWidth: 30, halign: 'right' },
+            2: { cellWidth: 30, halign: 'right' },
+            3: { cellWidth: 35, halign: 'right', fontStyle: 'bold' }
+        },
+        didDrawPage: (data) => {
+            // Footer on every page
+            const pageSize = doc.internal.pageSize;
+            const pageHeight = pageSize.height ? pageSize.height : pageSize.getHeight();
+            doc.setFontSize(8);
+            doc.setTextColor(150);
+            doc.text(`Página ${data.pageNumber} - Gerado por SP Assessoria System`, 14, pageHeight - 10);
+            doc.text(`${formattedDate}`, pageWidth - 40, pageHeight - 10, { align: 'right' });
+        }
+    });
+
+    doc.save(`DRE_${headerData.companyName}_${new Date().toISOString().split('T')[0]}.pdf`);
   };
 
-  if (!summary) return null;
+  const handleExportOpinionPDF = () => {
+      const currentOpinion = opinions[activeOpinionTab];
+      if (!currentOpinion) {
+          alert("O parecer ainda não foi gerado. Aguarde a conclusão da análise da IA.");
+          return;
+      }
+
+      const doc = new jsPDF();
+      const pageWidth = doc.internal.pageSize.width;
+      const pageHeight = doc.internal.pageSize.height;
+      const marginX = 14;
+      const marginBottom = 20; // Space for footer
+
+      // Helper for Footer
+      const drawFooter = (pageNum: number, totalPages: number) => {
+           doc.setFontSize(8);
+           doc.setTextColor(150);
+           doc.text(`Página ${pageNum} de ${totalPages} - Gerado por SP Assessoria System`, marginX, pageHeight - 10);
+           doc.text(`${formattedDate}`, pageWidth - marginX, pageHeight - 10, { align: 'right' });
+      };
+      
+      // Page 1 Setup
+      drawPDFHeader(doc, pageWidth);
+
+      let y = 50;
+
+      // Title based on active tab
+      const titles: Record<string, string> = {
+          'financial': 'Parecer de Saúde Financeira e Contábil',
+          'costs': 'Análise de Custos e CMV (IFRS)',
+          'compliance': 'Auditoria Fiscal e Compliance SPED'
+      };
+      
+      doc.setTextColor(0, 0, 0);
+      doc.setFontSize(14);
+      doc.setFont("helvetica", "bold");
+      doc.text(titles[activeOpinionTab] || 'Parecer Contábil', marginX, y);
+      
+      y += 10;
+      
+      // Content Text Processing
+      doc.setFontSize(10);
+      doc.setFont("helvetica", "normal");
+      doc.setTextColor(20);
+      
+      // Split text into lines that fit the width
+      const splitText = doc.splitTextToSize(currentOpinion, pageWidth - (marginX * 2));
+      const lineHeight = 6;
+      
+      // Loop through lines to handle pagination
+      for (let i = 0; i < splitText.length; i++) {
+          // Check if we reached the bottom margin
+          if (y > pageHeight - marginBottom) {
+              doc.addPage();
+              drawPDFHeader(doc, pageWidth); // Re-draw header on new pages
+              y = 50; // Reset Y position
+          }
+          doc.text(splitText[i], marginX, y);
+          y += lineHeight;
+      }
+      
+      // Apply Footers to ALL pages
+      const totalPages = doc.getNumberOfPages();
+      for (let i = 1; i <= totalPages; i++) {
+          doc.setPage(i);
+          drawFooter(i, totalPages);
+      }
+
+      doc.save(`Parecer_${activeOpinionTab}_${headerData.companyName}.pdf`);
+  };
+
+  // --- OPINIONS FETCH ---
+  const fetchOpinion = async (type: 'financial' | 'costs' | 'compliance') => {
+      if (opinions[type] || loadingOpinions[type]) return;
+      setLoadingOpinions(prev => ({ ...prev, [type]: true }));
+      try {
+          let res = '';
+          if (type === 'financial') res = await generateFinancialInsight(result, "Parecer financeiro completo.", 5);
+          else if (type === 'costs') res = await generateCMVAnalysis(result, "IFRS");
+          else res = await generateSpedComplianceCheck(result);
+          setOpinions(prev => ({ ...prev, [type]: res }));
+      } catch (e) { console.error(e); }
+      finally { setLoadingOpinions(prev => ({ ...prev, [type]: false })); }
+  };
+
+  useEffect(() => { fetchOpinion(activeOpinionTab); }, [activeOpinionTab]);
+
+  const filteredAccounts = useMemo(() => {
+    if (!accounts) return [];
+    if (!searchTerm) return accounts;
+    const s = searchTerm.toLowerCase();
+    return accounts.filter(a => a.account_name.toLowerCase().includes(s) || (a.account_code && a.account_code.toLowerCase().includes(s)));
+  }, [accounts, searchTerm]);
+
+  // --- RENDERERS ---
+
+  const findCorrection = (name: string) => {
+      if (!spell_check || spell_check.length === 0) return null;
+      return spell_check.find(s => name.toLowerCase().includes(s.original_term.toLowerCase()));
+  };
+
+  // Improved DRE Row Renderer
+  const renderDRERow = (account: ExtractedAccount) => {
+      const correction = findCorrection(account.account_name);
+      // Visual Alert for Inversions
+      const isInverted = account.possible_inversion;
+
+      return (
+          <tr key={account.account_code || Math.random()} className={`text-xs border-b dark:border-slate-800 transition-colors ${isInverted ? 'bg-amber-50 hover:bg-amber-100 dark:bg-amber-900/20 border-l-4 border-l-amber-500' : 'hover:bg-slate-50 dark:hover:bg-slate-800'}`}>
+              <td className="pl-4 pr-2 py-3">
+                  <div className="flex flex-col">
+                    <div className="flex items-center gap-2 flex-wrap">
+                        {isInverted && (
+                            <span title="Possível inversão de natureza" className="text-amber-500">⚠️</span>
+                        )}
+                        <span className={correction ? "line-through opacity-50 decoration-red-500" : "font-medium text-slate-700 dark:text-slate-300"}>
+                            {account.account_name}
+                        </span>
+                        {correction && (
+                            <span className="text-[10px] text-amber-600 bg-amber-50 px-1 border border-amber-200 rounded">
+                                {correction.suggested_correction}
+                            </span>
+                        )}
+                    </div>
+                    {account.account_code && <span className="text-[10px] text-slate-400 font-mono mt-0.5">{account.account_code}</span>}
+                  </div>
+              </td>
+              <td className="px-2 py-3 text-right font-mono text-slate-500 border-r dark:border-slate-700">
+                  {account.debit_value > 0 ? formatCurrency(account.debit_value) : '-'}
+              </td>
+              <td className="px-2 py-3 text-right font-mono text-slate-500 border-r dark:border-slate-700">
+                  {account.credit_value > 0 ? formatCurrency(account.credit_value) : '-'}
+              </td>
+              <td className={`px-4 py-3 text-right font-mono font-bold ${account.final_balance < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
+                  {formatCurrency(account.final_balance)}
+              </td>
+          </tr>
+      );
+  };
 
   return (
-    <div className="space-y-8 animate-fadeIn relative">
-      <div className="bg-white dark:bg-slate-800 p-6 rounded-xl shadow-sm mb-2 border border-slate-200 dark:border-slate-700 print:hidden">
-        <h2 className="text-2xl font-bold text-slate-800 dark:text-white">{headerData.companyName || 'Empresa não identificada'}</h2>
-        <div className="flex flex-col md:flex-row md:items-center gap-2 mt-1 text-slate-500 dark:text-slate-400 text-sm font-medium">
-            {headerData.cnpj && <span>CNPJ: {headerData.cnpj}</span>}
-            {summary.period && <span>• Período: {summary.period}</span>}
-        </div>
-      </div>
-
-      <div id="summary" className="bg-white dark:bg-slate-800 rounded-xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden print:shadow-none print:border-none">
-        <div className="bg-slate-800 dark:bg-slate-900 px-6 py-4 flex justify-between items-center print:bg-white print:text-black print:px-0 print:border-b">
-          <h3 className="text-xl font-semibold text-white print:text-black">Resumo: {summary.document_type}</h3>
+    <div className="space-y-6 animate-fadeIn pb-20">
+      
+      {/* HEADER ACTIONS (Global for All Tabs) */}
+      <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 flex flex-col md:flex-row justify-between items-center gap-4">
+          <div>
+              <h2 className="text-2xl font-black text-slate-800 dark:text-white">{headerData.companyName}</h2>
+              <div className="flex gap-3 text-sm text-slate-500 flex-wrap">
+                  <span className="font-mono">{headerData.cnpj}</span>
+                  <span>•</span>
+                  <span>Operador: <strong>{headerData.collaboratorName}</strong></span>
+                  <span>•</span>
+                  <span>{formattedDate}</span>
+              </div>
+          </div>
+          {/* GLOBAL FUNCTIONAL BUTTONS */}
           <div className="flex gap-2 print:hidden">
-              <button onClick={handlePrint} className="text-xs bg-slate-700 hover:bg-slate-600 text-white px-4 py-2 rounded-full border border-slate-600 transition-colors flex items-center gap-2 font-bold shadow-sm">
-                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M6.72 13.829c-.24.03-.48.062-.72.096m.72-.096a42.415 42.415 0 0110.56 0m-10.56 0L6.34 18m10.94-4.171c.24.03.48.062.72.096m-.72-.096L17.66 18m0 0l.229 2.523a1.125 1.125 0 01-1.12 1.227H7.231c-.662 0-1.18-.568-1.12-1.227L6.34 18m11.318 0h1.091A2.25 2.25 0 0021 15.75V9.456c0-1.081-.768-2.015-1.837-2.175a48.055 48.055 0 00-1.913-.247M6.34 18H5.25A2.25 2.25 0 013 15.75V9.456c0-1.081.768-2.015 1.837-2.175a48.041 48.041 0 011.913-.247m10.5 0a48.536 48.536 0 00-10.5 0m10.5 0V3.375c0-.621-.504-1.125-1.125-1.125h-8.25c-.621 0-1.125.504-1.125 1.125v3.659M18 10.5h.008v.008H18V10.5zm-3 0h.008v.008H15V10.5z" />
-                </svg>
-                 Imprimir
+              <button onClick={handlePrint} className="flex items-center gap-2 px-4 py-2 bg-slate-100 dark:bg-slate-700 rounded-lg font-bold text-xs hover:bg-slate-200 text-slate-700 dark:text-white transition-colors">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
+                  Imprimir
               </button>
-              
-              <button onClick={handleShare} className="text-xs bg-indigo-600 hover:bg-indigo-500 text-white px-4 py-2 rounded-full border border-indigo-500 transition-colors flex items-center gap-2 font-bold shadow-sm">
-                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M21.75 6.75v10.5a2.25 2.25 0 01-2.25 2.25h-15a2.25 2.25 0 01-2.25-2.25V6.75m19.5 0A2.25 2.25 0 0019.5 4.5h-15a2.25 2.25 0 00-2.25 2.25m19.5 0v.243a2.25 2.25 0 01-1.07 1.916l-7.5 4.615a2.25 2.25 0 01-2.36 0L3.32 8.91a2.25 2.25 0 01-1.07-1.916V6.75" />
-                </svg>
-                 Compartilhar por e-mail
+              <button onClick={handleShare} className="flex items-center gap-2 px-4 py-2 bg-slate-100 dark:bg-slate-700 rounded-lg font-bold text-xs hover:bg-slate-200 text-slate-700 dark:text-white transition-colors">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" /></svg>
+                  Compartilhar
               </button>
-
-              <button onClick={handleDownloadPDF} className="text-xs bg-white/10 hover:bg-white/20 text-white px-4 py-2 rounded-full border border-white/30 transition-colors flex items-center gap-2 font-bold shadow-sm">
-                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-4 h-4">
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M12 12.75l-3-3m0 0l-3 3m3-3v7.5M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
-                 Exportar PDF
+              <button onClick={handleExportPDF} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg font-bold text-xs hover:bg-blue-700 shadow-lg shadow-blue-500/20 transition-transform active:scale-95">
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                  Exportar PDF
               </button>
           </div>
-        </div>
-        
-        {/* KEY METRICS GRID */}
-        <div className="p-6 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 print:grid-cols-2 print:gap-4">
-            <div className="p-4 bg-blue-50 dark:bg-blue-900/20 rounded-lg border border-blue-100 dark:border-blue-800">
-                <p className="text-xs text-blue-600 font-bold uppercase tracking-wider">Débitos (Total)</p>
-                <p className="text-2xl font-bold text-blue-900 dark:text-blue-100 mt-1">{formatCurrency(summary.total_debits)}</p>
-            </div>
-            <div className="p-4 bg-red-50 dark:bg-red-900/20 rounded-lg border border-red-100 dark:border-red-800">
-                <p className="text-xs text-red-600 font-bold uppercase tracking-wider">Créditos (Total)</p>
-                <p className="text-2xl font-bold text-red-900 dark:text-red-100 mt-1">{formatCurrency(summary.total_credits)}</p>
-            </div>
-            <div className={`p-4 rounded-lg border ${profitLossStyle.bg} ${profitLossStyle.border}`}>
-                <p className={`text-xs font-bold uppercase tracking-wider ${profitLossStyle.text}`}>{finalResultLabel}</p>
-                <p className={`text-2xl font-bold mt-1 ${profitLossStyle.text}`}>{formatCurrency(finalResultValue)}</p>
-            </div>
-            <div className={`p-4 rounded-lg border ${summary.is_balanced ? 'bg-emerald-50 border-emerald-100' : 'bg-rose-50 border-rose-100'}`}>
-                <p className="text-xs text-slate-500 font-bold uppercase tracking-wider">Conformidade</p>
-                <div className="flex items-center gap-2 mt-1">
-                    <span className={`text-lg font-bold ${summary.is_balanced ? 'text-emerald-700' : 'text-rose-700'}`}>
-                        {summary.is_balanced ? 'Balanceado' : 'Divergente'}
-                    </span>
-                    {summary.is_balanced 
-                        ? <span className="text-emerald-600 bg-emerald-100 rounded-full px-2 text-xs">OK</span>
-                        : <span className="text-rose-600 bg-rose-100 rounded-full px-2 text-xs font-mono">Diff: {formatCurrency(summary.discrepancy_amount)}</span>
-                    }
-                </div>
-            </div>
-        </div>
-        
-        {/* CONSOLIDATED INSIGHTS SECTION */}
-        <div className="px-6 pb-6">
-             <div className="bg-gradient-to-r from-slate-50 to-white dark:from-slate-800 dark:to-slate-700 rounded-xl border border-slate-200 dark:border-slate-600 overflow-hidden">
-                <div className="px-4 py-3 border-b border-slate-200 dark:border-slate-600 flex items-center gap-2 bg-slate-100/50 dark:bg-slate-800">
-                    <span className="text-xl">🧠</span>
-                    <h3 className="font-bold text-slate-700 dark:text-white text-sm uppercase tracking-wide">Parecer da Auditoria Inteligente</h3>
-                </div>
-                <div className="p-5">
-                    {summary.observations.length > 0 ? (
-                        <div className="space-y-3">
-                            {summary.observations.map((obs, i) => (
-                                <div key={i} className="flex items-start gap-3">
-                                    <div className="mt-1 min-w-[20px]">
-                                        {obs.toLowerCase().includes('atenção') || obs.toLowerCase().includes('erro') 
-                                            ? <span className="text-red-500 text-lg">⚠️</span> 
-                                            : <span className="text-blue-500 text-lg">ℹ️</span>
-                                        }
-                                    </div>
-                                    <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed bg-white dark:bg-slate-900 p-3 rounded-lg border border-slate-100 dark:border-slate-600 shadow-sm w-full">
-                                        {obs}
-                                    </p>
-                                </div>
-                            ))}
-                        </div>
-                    ) : (
-                        <div className="flex flex-col items-center justify-center py-6 text-slate-400">
-                            <span className="text-2xl mb-2">✓</span>
-                            <p className="text-sm italic">Nenhuma anomalia crítica ou observação relevante detectada automaticamente pela IA.</p>
-                        </div>
-                    )}
-                </div>
-            </div>
-        </div>
       </div>
 
-       {/* BALANCE SHEET SPECIFIC CHART (Stacked) */}
-       {balanceSheetChartData && (
-          <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden print:hidden mb-6">
-             <div className="px-6 py-4 bg-indigo-50 dark:bg-indigo-900/30 border-b border-indigo-100 dark:border-indigo-800">
-                 <h3 className="text-lg font-bold text-indigo-900 dark:text-indigo-100 flex items-center gap-2">
-                     <span>🏛️</span> Estrutura Patrimonial
-                 </h3>
-             </div>
-             <div className="p-6 w-full h-[350px]">
-                 <ResponsiveContainer width="100%" height="100%">
-                     <BarChart data={balanceSheetChartData} layout="vertical" barSize={40} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-                         <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
-                         <XAxis type="number" tickFormatter={(v) => new Intl.NumberFormat('pt-BR', { notation: 'compact' }).format(v)} />
-                         <YAxis dataKey="name" type="category" width={100} />
-                         <Tooltip formatter={(value: number) => formatCurrency(value)} />
-                         <Legend />
-                         <Bar dataKey="Circulante" stackId="a" fill="#3b82f6" name="Circulante" />
-                         <Bar dataKey="NaoCirculante" stackId="a" fill="#1d4ed8" name="Não Circulante" />
-                         <Bar dataKey="PatrimonioLiquido" stackId="a" fill="#10b981" name="Patrimônio Líquido" />
-                     </BarChart>
-                 </ResponsiveContainer>
-             </div>
-          </div>
-       )}
-
-       {/* STANDARD CHART SECTION */}
-       {isChartExpanded && (
-          <div id="chart" className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden print:hidden">
-            <div className="px-6 py-4 bg-slate-100 dark:bg-slate-900 border-b dark:border-slate-700 flex justify-between items-center">
-                <h3 className="text-lg font-semibold dark:text-white flex items-center gap-2"><span>📈</span> Movimentação das Principais Contas</h3>
-                <button onClick={() => setIsChartExpanded(!isChartExpanded)} className="text-slate-500 font-mono text-xl">{isChartExpanded ? '▼' : '▶'}</button>
-            </div>
-            <div className="p-6 w-full" style={{ height: 400 }}>
-                {chartData.length > 0 ? (
-                    <ResponsiveContainer width="100%" height="100%">
-                        <BarChart data={chartData} margin={{ top: 20, right: 30, left: 20, bottom: 5 }}>
-                            <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-                            <XAxis dataKey="name" stroke="#64748b" tick={{ fill: '#64748b', fontSize: 11 }} />
-                            <YAxis stroke="#64748b" tick={{ fill: '#64748b', fontSize: 11 }} tickFormatter={(value) => new Intl.NumberFormat('pt-BR', { notation: "compact" }).format(value)} />
-                            <Tooltip formatter={(value: number) => formatCurrency(value)} />
-                            <Legend wrapperStyle={{ paddingTop: '20px' }} />
-                            <Bar dataKey="initial" name="Saldo Anterior" fill="#94a3b8" radius={[4, 4, 0, 0]} />
-                            <Bar dataKey="final" name="Saldo Atual" fill="#2563eb" radius={[4, 4, 0, 0]} />
-                        </BarChart>
-                    </ResponsiveContainer>
-                ) : (
-                    <div className="h-full flex flex-col items-center justify-center text-slate-400">
-                        <p>Dados insuficientes para gerar o gráfico.</p>
-                    </div>
-                )}
-            </div>
-          </div>
-       )}
-
-      {/* TOOLS SECTION (EBITDA, CMV, SPED) */}
-      <div id="valuation" className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden print:hidden">
-          <div className="px-6 py-4 bg-emerald-700 dark:bg-emerald-900 border-b dark:border-slate-700 flex justify-between items-center">
-              <h3 className="text-lg font-semibold text-white">Ferramentas Financeiras & Valuation (IA)</h3>
-              <button onClick={() => setIsValuationExpanded(!isValuationExpanded)} className="text-white hover:text-emerald-200 font-mono text-xl">{isValuationExpanded ? '▼' : '▶'}</button>
-          </div>
-          {isValuationExpanded && (
-            <div className="p-6 space-y-8">
-                {/* TOOL 1: EBITDA */}
-                <div className="border border-slate-200 dark:border-slate-700 rounded-lg p-5">
-                    <h4 className="font-bold text-emerald-800 dark:text-emerald-400 mb-4 flex items-center gap-2"><span className="text-xl">📊</span> EBITDA & Valuation</h4>
-                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                        <div className="lg:col-span-1 space-y-4">
-                            <textarea value={insightPrompt} onChange={(e) => setInsightPrompt(e.target.value)} className="w-full h-24 p-2 border rounded text-sm dark:bg-slate-700 dark:text-white resize-none" />
-                            <button onClick={handleGenerateEBITDA} disabled={isEbitdaLoading} className="w-full py-2 bg-emerald-600 text-white rounded font-bold hover:bg-emerald-700 disabled:opacity-50">
-                                {isEbitdaLoading ? 'Calculando...' : '⚡ Calcular'}
-                            </button>
-                        </div>
-                        <div className="lg:col-span-2 bg-slate-50 dark:bg-slate-900/50 p-4 rounded border dark:border-slate-700 min-h-[200px]">
-                             {ebitdaResult ? (
-                                <div className="prose dark:prose-invert max-w-none text-sm">
-                                    <pre className="whitespace-pre-wrap font-sans text-slate-700 dark:text-slate-300">{ebitdaResult}</pre>
-                                    <button onClick={() => exportPDFContent('EBITDA', ebitdaResult)} className="mt-2 text-xs bg-emerald-100 text-emerald-700 px-2 py-1 rounded">PDF</button>
-                                </div>
-                            ) : <p className="text-slate-400 text-sm">Resultados aparecerão aqui.</p>}
-                        </div>
-                    </div>
-                </div>
-            </div>
-          )}
+      {/* TABS NAVIGATION */}
+      <div className="flex overflow-x-auto gap-2 pb-2 print:hidden">
+          {[
+              { id: 'dashboard', label: '📊 Dashboard', desc: 'Visão Geral' },
+              { id: 'dre', label: '📉 D.R.E.', desc: 'Resultado (4 Colunas)' },
+              { id: 'bp', label: '⚖️ Balanço', desc: 'Patrimonial' },
+              { id: 'list', label: '📑 Razão', desc: 'Lista Completa' },
+          ].map(tab => (
+              <button
+                  key={tab.id}
+                  onClick={() => setViewTab(tab.id as any)}
+                  className={`flex-1 min-w-[140px] p-4 rounded-xl border text-left transition-all ${
+                      viewTab === tab.id 
+                      ? 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-500/30' 
+                      : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-700'
+                  }`}
+              >
+                  <span className="block font-black text-sm uppercase tracking-wide">{tab.label}</span>
+                  <span className={`text-xs ${viewTab === tab.id ? 'text-blue-100' : 'text-slate-400'}`}>{tab.desc}</span>
+              </button>
+          ))}
       </div>
 
-      {/* DRE IFRS */}
-      {summary.document_type === 'DRE' && (
-        <div className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden print:hidden border-indigo-200 dark:border-indigo-900">
-             <div className="px-6 py-4 bg-indigo-50 dark:bg-indigo-900/30 border-b border-indigo-100 dark:border-indigo-800 flex justify-between items-center">
-                 <h3 className="text-lg font-bold text-indigo-900 dark:text-indigo-100">Visão DRE - IFRS 18</h3>
-                 <div className="flex items-center gap-3">
-                     <div className="flex gap-1">
-                         {/* ADDED SINGLE TOGGLE BUTTONS GROUP AS REQUESTED, ENSURING VISIBILITY */}
-                         <button onClick={expandAllIFRS} disabled={!hasIFRSData} className="px-3 py-1.5 rounded-l bg-white border border-indigo-200 text-indigo-700 text-xs font-bold hover:bg-indigo-50 transition-colors">Expandir Tudo</button>
-                         <button onClick={collapseAllIFRS} disabled={!hasIFRSData} className="px-3 py-1.5 rounded-r bg-white border-t border-b border-r border-indigo-200 text-indigo-700 text-xs font-bold hover:bg-indigo-50 transition-colors">Recolher Tudo</button>
-                     </div>
-                     <button onClick={handleExportIFRS} className="px-3 py-1.5 rounded bg-indigo-600 text-white text-xs font-bold shadow-sm hover:bg-indigo-700">Exportar PDF</button>
-                 </div>
-             </div>
-             <div className="p-4 bg-indigo-50/30">
-                 {Object.entries(ifrsGroups).map(([category, itemsRaw]) => {
-                     const items = itemsRaw as ExtractedAccount[];
-                     if (items.length === 0) return null;
-                     const categoryTotal = items.reduce((sum, item) => sum + item.total_value, 0);
-                     return (
-                        <div key={category} className="border rounded-lg bg-white dark:bg-slate-800 mb-2 overflow-hidden shadow-sm">
-                            <button onClick={() => toggleIFRSCategory(category as any)} className="w-full flex justify-between items-center p-3 bg-blue-50 dark:bg-blue-900/20 hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors">
-                                <span className="font-bold text-slate-800 dark:text-white uppercase text-sm">{category} ({items.length})</span>
-                                <span className="font-mono font-bold">{formatCurrency(categoryTotal)}</span>
-                            </button>
-                            {expandedIFRSCategories[category as keyof typeof expandedIFRSCategories] && (
-                                <div className="border-t dark:border-slate-700 p-2">
-                                    {items.map(i => (
-                                        <div key={i.account_name} className="flex justify-between text-xs py-1 px-2 border-b last:border-0 border-slate-100 dark:border-slate-700">
-                                            <span>{i.account_name}</span>
-                                            <span>{formatCurrency(i.total_value)}</span>
-                                        </div>
-                                    ))}
+      {/* === DASHBOARD TAB === */}
+      {viewTab === 'dashboard' && (
+          <div className="space-y-6 animate-fadeIn">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div className="p-5 bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700">
+                        <p className="text-xs font-bold text-slate-400 uppercase">Receita Bruta Est.</p>
+                        <p className="text-xl font-black text-blue-600 mt-1">{formatCurrency(financialStructure.dreTotals.receitaBruta)}</p>
+                    </div>
+                    <div className="p-5 bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700">
+                        <p className="text-xs font-bold text-slate-400 uppercase">Total Ativo</p>
+                        <p className="text-xl font-black text-slate-800 dark:text-white mt-1">{formatCurrency(financialStructure.bpTotals.ac + financialStructure.bpTotals.anc)}</p>
+                    </div>
+                    <div className="p-5 bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700">
+                        <p className="text-xs font-bold text-slate-400 uppercase">Patrimônio Líquido</p>
+                        <p className="text-xl font-black text-emerald-600 mt-1">{formatCurrency(financialStructure.bpTotals.pl)}</p>
+                    </div>
+                    {/* RESULTADO EVIDENCIADO */}
+                    <div className={`p-5 rounded-2xl shadow-md border-2 transform transition-transform hover:scale-105 ${financialStructure.calculatedResult >= 0 ? 'bg-gradient-to-br from-green-50 to-white border-green-200 dark:from-green-900/40 dark:to-slate-800 dark:border-green-800' : 'bg-gradient-to-br from-red-50 to-white border-red-200 dark:from-red-900/40 dark:to-slate-800 dark:border-red-800'}`}>
+                        <p className={`text-xs font-bold uppercase flex items-center gap-1 ${financialStructure.calculatedResult >= 0 ? 'text-green-700' : 'text-red-600'}`}>
+                            {financialStructure.calculatedResult >= 0 ? '📈 Lucro do Período' : '📉 Prejuízo do Período'}
+                        </p>
+                        <p className={`text-2xl font-black mt-1 ${financialStructure.calculatedResult >= 0 ? 'text-green-700' : 'text-red-600'}`}>
+                            {formatCurrency(financialStructure.calculatedResult)}
+                        </p>
+                    </div>
+                </div>
+
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                     {/* OPINION SECTION */}
+                     <div className="lg:col-span-2 bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden flex flex-col">
+                        <div className="flex flex-col md:flex-row border-b dark:border-slate-700">
+                            <div className="flex-1 flex">
+                                <button onClick={() => setActiveOpinionTab('financial')} className={`flex-1 p-4 text-xs font-bold uppercase ${activeOpinionTab === 'financial' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'text-slate-400'}`}>Saúde Financeira</button>
+                                <button onClick={() => setActiveOpinionTab('costs')} className={`flex-1 p-4 text-xs font-bold uppercase ${activeOpinionTab === 'costs' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'text-slate-400'}`}>Custos (CMV)</button>
+                                <button onClick={() => setActiveOpinionTab('compliance')} className={`flex-1 p-4 text-xs font-bold uppercase ${activeOpinionTab === 'compliance' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'text-slate-400'}`}>Fiscal/SPED</button>
+                            </div>
+                            <div className="p-2 flex items-center justify-end border-l border-slate-100 dark:border-slate-700">
+                                <button 
+                                    onClick={handleExportOpinionPDF}
+                                    className="flex items-center gap-2 px-3 py-1.5 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded text-[10px] font-bold hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
+                                    title="Baixar este parecer em PDF para enviar ao cliente"
+                                >
+                                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
+                                    Exportar Parecer
+                                </button>
+                            </div>
+                        </div>
+                        <div className="p-6 min-h-[200px]">
+                            {loadingOpinions[activeOpinionTab] ? (
+                                <div className="flex flex-col items-center justify-center h-full space-y-3">
+                                    <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-600"></div>
+                                    <p className="text-xs text-slate-400 animate-pulse">Gerando análise com IA...</p>
                                 </div>
+                            ) : (
+                                <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-300 whitespace-pre-wrap">
+                                    {opinions[activeOpinionTab]}
+                                </p>
                             )}
                         </div>
-                     );
-                 })}
-             </div>
-        </div>
+                     </div>
+
+                     {/* CHART */}
+                     <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 p-4">
+                         <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 text-center">Estrutura Patrimonial</h3>
+                         <div className="h-[250px]">
+                            <ResponsiveContainer width="100%" height="100%">
+                                <BarChart data={[
+                                    { name: 'Ativo', Circulante: financialStructure.bpTotals.ac, Fixo: financialStructure.bpTotals.anc },
+                                    { name: 'Passivo', Circulante: financialStructure.bpTotals.pc, Fixo: financialStructure.bpTotals.pnc + financialStructure.bpTotals.pl }
+                                ]}>
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                                    <XAxis dataKey="name" tick={{fontSize: 10}} />
+                                    <YAxis hide />
+                                    <Tooltip formatter={(val: number) => formatCurrency(val)} />
+                                    <Legend />
+                                    <Bar dataKey="Circulante" stackId="a" fill="#3b82f6" barSize={40} />
+                                    <Bar dataKey="Fixo" stackId="a" fill="#1e40af" barSize={40} />
+                                </BarChart>
+                            </ResponsiveContainer>
+                         </div>
+                     </div>
+                </div>
+          </div>
       )}
 
-      {/* ACCOUNT LIST TABLE */}
-      <div id="accounts" className="bg-white dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 overflow-hidden">
-         <div className="px-6 py-4 border-b dark:border-slate-700 flex flex-wrap justify-between items-center gap-3">
-            <h3 className="text-lg font-semibold dark:text-white flex items-center gap-2">
-                Detalhamento de Contas ({filteredAndSortedAccounts.length})
-                
-                {/* THEME SELECTOR UI */}
-                <div className="relative inline-block text-left ml-2">
-                    <button 
-                        onClick={() => setShowThemeSettings(!showThemeSettings)} 
-                        className="text-xs bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-300 px-3 py-1.5 rounded-full border border-slate-300 dark:border-slate-600 flex items-center gap-2 hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
-                    >
-                        <span>🎨</span> Tema: {customTheme.name}
-                    </button>
-                    {showThemeSettings && (
-                        <div className="absolute left-0 mt-2 w-48 bg-white dark:bg-slate-800 rounded-lg shadow-xl z-50 border border-slate-200 dark:border-slate-600 overflow-hidden ring-1 ring-black ring-opacity-5">
-                            {DEFAULT_THEMES.map(t => (
-                                <button 
-                                    key={t.name} 
-                                    onClick={() => applyTheme(t)} 
-                                    className="block w-full text-left px-4 py-2 text-sm text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700 flex items-center gap-2"
-                                >
-                                    <div className="w-3 h-3 rounded-full border" style={{ backgroundColor: t.headerBg }}></div>
-                                    {t.name}
-                                </button>
-                            ))}
-                        </div>
-                    )}
-                </div>
-            </h3>
-            
-            <div className="flex flex-wrap gap-2">
-                <button onClick={() => setShowCorrectedNames(!showCorrectedNames)} className="px-3 py-2 rounded text-sm border bg-white dark:bg-slate-700 dark:text-white hover:bg-slate-50">{showCorrectedNames ? 'Ver Original' : 'Ver Corrigidos'}</button>
-                <button onClick={() => setShowSuggestionCol(!showSuggestionCol)} className="px-3 py-2 rounded text-sm border bg-white dark:bg-slate-700 dark:text-white hover:bg-slate-50">{showSuggestionCol ? 'Ocultar Sugestões' : 'Ver Sugestões'}</button>
+      {/* === DRE TAB (UPDATED LAYOUT WITH 4 COLUMNS) === */}
+      {viewTab === 'dre' && (
+          <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden animate-fadeIn">
+             
+             {/* DRE Specific Toolbar */}
+             <div className="bg-slate-50 dark:bg-slate-900/50 p-4 border-b dark:border-slate-700 flex flex-col md:flex-row justify-between items-center gap-4">
+                 <h3 className="font-bold text-slate-800 dark:text-white flex items-center gap-2">
+                     D.R.E.
+                     <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full uppercase">Visualização Detalhada (4 Colunas)</span>
+                 </h3>
+             </div>
+
+             {/* DRE TABLE */}
+             <div className="overflow-x-auto">
+                 <table className="w-full text-sm">
+                     <thead className="bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-400 text-xs uppercase font-bold sticky top-0 z-10">
+                         <tr>
+                             <th className="px-4 py-3 text-left w-1/2">Conta / Descrição</th>
+                             <th className="px-2 py-3 text-right bg-slate-200/50 dark:bg-slate-800">Débito</th>
+                             <th className="px-2 py-3 text-right bg-slate-200/50 dark:bg-slate-800">Crédito</th>
+                             <th className="px-4 py-3 text-right">Lucro/Prejuízo (Saldo)</th>
+                         </tr>
+                     </thead>
+                     <tbody className="divide-y dark:divide-slate-700">
+                         {/* Receitas */}
+                         <tr className="bg-slate-50 dark:bg-slate-900/30 font-bold text-blue-700 dark:text-blue-400">
+                             <td className="px-4 py-2" colSpan={3}>1. RECEITA OPERACIONAL BRUTA</td>
+                             <td className="px-4 py-2 text-right">{formatCurrency(financialStructure.dreTotals.receitaBruta)}</td>
+                         </tr>
+                         {financialStructure.dre.receitaBruta.map(a => renderDRERow(a))}
+
+                         {/* Deduções */}
+                         <tr className="bg-slate-50 dark:bg-slate-900/30 font-bold text-slate-600 dark:text-slate-400">
+                             <td className="px-4 py-2" colSpan={3}>2. (-) DEDUÇÕES DA RECEITA</td>
+                             <td className="px-4 py-2 text-right text-red-500">({formatCurrency(financialStructure.dreTotals.deducoes)})</td>
+                         </tr>
+                         {financialStructure.dre.deducoes.map(a => renderDRERow(a))}
+
+                         {/* Receita Líquida */}
+                         <tr className="bg-blue-50 dark:bg-blue-900/20 font-black text-slate-800 dark:text-white border-t border-b border-blue-100 dark:border-blue-900">
+                             <td className="px-4 py-3 text-right uppercase" colSpan={3}>(=) Receita Líquida</td>
+                             <td className="px-4 py-3 text-right">{formatCurrency(financialStructure.dreTotals.receitaBruta - financialStructure.dreTotals.deducoes)}</td>
+                         </tr>
+
+                         {/* Custos */}
+                         <tr className="bg-slate-50 dark:bg-slate-900/30 font-bold text-slate-600 dark:text-slate-400">
+                             <td className="px-4 py-2" colSpan={3}>3. (-) CUSTOS (CMV/CPV/CSP)</td>
+                             <td className="px-4 py-2 text-right text-red-500">({formatCurrency(financialStructure.dreTotals.custos)})</td>
+                         </tr>
+                         {financialStructure.dre.custos.map(a => renderDRERow(a))}
+
+                         {/* Lucro Bruto */}
+                         <tr className="bg-emerald-50 dark:bg-emerald-900/20 font-black text-emerald-800 dark:text-emerald-300 border-t border-b border-emerald-100 dark:border-emerald-900">
+                             <td className="px-4 py-3 text-right uppercase" colSpan={3}>(=) Lucro Bruto</td>
+                             <td className="px-4 py-3 text-right">{formatCurrency(financialStructure.dreTotals.receitaBruta - financialStructure.dreTotals.deducoes - financialStructure.dreTotals.custos)}</td>
+                         </tr>
+
+                         {/* Despesas */}
+                         <tr className="bg-slate-50 dark:bg-slate-900/30 font-bold text-slate-600 dark:text-slate-400">
+                             <td className="px-4 py-2" colSpan={3}>4. (-) DESPESAS OPERACIONAIS</td>
+                             <td className="px-4 py-2 text-right text-red-500">({formatCurrency(financialStructure.dreTotals.despesas)})</td>
+                         </tr>
+                         {financialStructure.dre.despesasOp.map(a => renderDRERow(a))}
+
+                         {/* Financeiro */}
+                         <tr className="bg-slate-50 dark:bg-slate-900/30 font-bold text-slate-600 dark:text-slate-400">
+                             <td className="px-4 py-2" colSpan={3}>5. (-) RESULTADO FINANCEIRO</td>
+                             <td className="px-4 py-2 text-right text-red-500">({formatCurrency(financialStructure.dreTotals.financeiro)})</td>
+                         </tr>
+                         {financialStructure.dre.financeiro.map(a => renderDRERow(a))}
+
+                         {/* Resultado Final - EVIDENCIADO */}
+                         <tr className={`text-lg font-black border-t-4 border-slate-900 ${financialStructure.calculatedResult >= 0 ? 'bg-green-100 dark:bg-green-900 text-green-900 dark:text-white' : 'bg-red-100 dark:bg-red-900 text-red-900 dark:text-white'}`}>
+                             <td className="px-4 py-5 text-right uppercase tracking-wider" colSpan={3}>
+                                 {financialStructure.calculatedResult >= 0 ? '(=) LUCRO LÍQUIDO DO PERÍODO' : '(=) PREJUÍZO LÍQUIDO DO PERÍODO'}
+                             </td>
+                             <td className="px-4 py-5 text-right">{formatCurrency(financialStructure.calculatedResult)}</td>
+                         </tr>
+                     </tbody>
+                 </table>
+             </div>
+          </div>
+      )}
+
+      {/* === BALANÇO TAB === */}
+      {viewTab === 'bp' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fadeIn">
+              {/* ATIVO */}
+              <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden">
+                  <div className="bg-blue-600 p-4 text-white font-bold flex justify-between">
+                      <span>ATIVO</span>
+                      <span>{formatCurrency(financialStructure.bpTotals.ac + financialStructure.bpTotals.anc)}</span>
+                  </div>
+                  <div className="p-4 space-y-4">
+                      <div>
+                          <div className="flex justify-between font-bold text-slate-700 dark:text-slate-300 border-b dark:border-slate-600 pb-2 mb-2">
+                              <span>Circulante</span>
+                              <span>{formatCurrency(financialStructure.bpTotals.ac)}</span>
+                          </div>
+                          <div className="space-y-1">
+                              {financialStructure.balanco.ativoCirculante.slice(0, 8).map((a, i) => (
+                                  <div key={i} className="flex justify-between text-xs text-slate-500">
+                                      <span className="truncate pr-2">{a.account_name}</span>
+                                      <span>{formatCurrency(a.final_balance)}</span>
+                                  </div>
+                              ))}
+                          </div>
+                      </div>
+                      <div>
+                          <div className="flex justify-between font-bold text-slate-700 dark:text-slate-300 border-b dark:border-slate-600 pb-2 mb-2">
+                              <span>Não Circulante</span>
+                              <span>{formatCurrency(financialStructure.bpTotals.anc)}</span>
+                          </div>
+                          <div className="space-y-1">
+                             {financialStructure.balanco.ativoNaoCirculante.slice(0, 8).map((a, i) => (
+                                  <div key={i} className="flex justify-between text-xs text-slate-500">
+                                      <span className="truncate pr-2">{a.account_name}</span>
+                                      <span>{formatCurrency(a.final_balance)}</span>
+                                  </div>
+                              ))}
+                          </div>
+                      </div>
+                  </div>
+              </div>
+
+              {/* PASSIVO */}
+              <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden">
+                  <div className="bg-red-600 p-4 text-white font-bold flex justify-between">
+                      <span>PASSIVO + PL</span>
+                      <span>{formatCurrency(financialStructure.bpTotals.pc + financialStructure.bpTotals.pnc + financialStructure.bpTotals.pl)}</span>
+                  </div>
+                   <div className="p-4 space-y-4">
+                      <div>
+                          <div className="flex justify-between font-bold text-slate-700 dark:text-slate-300 border-b dark:border-slate-600 pb-2 mb-2">
+                              <span>Circulante</span>
+                              <span>{formatCurrency(financialStructure.bpTotals.pc)}</span>
+                          </div>
+                          <div className="space-y-1">
+                             {financialStructure.balanco.passivoCirculante.slice(0, 8).map((a, i) => (
+                                  <div key={i} className="flex justify-between text-xs text-slate-500">
+                                      <span className="truncate pr-2">{a.account_name}</span>
+                                      <span>{formatCurrency(a.final_balance)}</span>
+                                  </div>
+                              ))}
+                          </div>
+                      </div>
+                      <div>
+                          <div className="flex justify-between font-bold text-slate-700 dark:text-slate-300 border-b dark:border-slate-600 pb-2 mb-2">
+                              <span>Não Circulante</span>
+                              <span>{formatCurrency(financialStructure.bpTotals.pnc)}</span>
+                          </div>
+                           <div className="space-y-1">
+                             {financialStructure.balanco.passivoNaoCirculante.slice(0, 8).map((a, i) => (
+                                  <div key={i} className="flex justify-between text-xs text-slate-500">
+                                      <span className="truncate pr-2">{a.account_name}</span>
+                                      <span>{formatCurrency(a.final_balance)}</span>
+                                  </div>
+                              ))}
+                          </div>
+                      </div>
+                      <div>
+                          <div className="flex justify-between font-bold text-emerald-600 border-b dark:border-slate-600 pb-2 mb-2">
+                              <span>Patrimônio Líquido</span>
+                              <span>{formatCurrency(financialStructure.bpTotals.pl)}</span>
+                          </div>
+                           <div className="space-y-1">
+                             {financialStructure.balanco.patrimonioLiquido.map((a, i) => (
+                                  <div key={i} className="flex justify-between text-xs text-slate-500">
+                                      <span className="truncate pr-2">{a.account_name}</span>
+                                      <span>{formatCurrency(a.final_balance)}</span>
+                                  </div>
+                              ))}
+                              {financialStructure.balanco.patrimonioLiquido.length === 0 && (
+                                  <div className="flex justify-between text-xs text-slate-400 italic">
+                                      <span>Resultado do Período (Implícito)</span>
+                                      <span>{formatCurrency(financialStructure.bpTotals.pl)}</span>
+                                  </div>
+                              )}
+                          </div>
+                      </div>
+                  </div>
+              </div>
+          </div>
+      )}
+
+      {/* === LIST VIEW (Original) === */}
+      {viewTab === 'list' && (
+        <div className="bg-white dark:bg-slate-800 rounded-3xl shadow-xl border border-slate-200 dark:border-slate-700 overflow-hidden animate-fadeIn">
+            <div className="px-6 py-4 border-b dark:border-slate-700 flex justify-between items-center bg-slate-50 dark:bg-slate-900/50">
+                <h3 className="font-bold text-slate-700 dark:text-slate-300">Lista Completa de Contas</h3>
+                <input 
+                    type="text" 
+                    placeholder="Filtrar..." 
+                    value={searchTerm}
+                    onChange={e => setSearchTerm(e.target.value)}
+                    className="p-2 text-xs rounded border dark:bg-slate-700 dark:text-white"
+                />
             </div>
-         </div>
-         
-         <div style={{'--theme-header-bg': customTheme.headerBg, '--theme-header-text': customTheme.headerText, '--theme-row-odd': customTheme.rowOddBg, '--theme-row-even': customTheme.rowEvenBg, '--theme-border': customTheme.border} as React.CSSProperties} className="overflow-auto max-h-[70vh]">
-          <table className="min-w-full divide-y divide-[var(--theme-border)]">
-            <thead className="bg-[var(--theme-header-bg)] sticky top-0 z-20 shadow-md">
-              <tr>
-                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-left text-xs font-medium uppercase">Código</th>
-                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-left text-xs font-medium uppercase">Conta</th>
-                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-center text-xs font-medium uppercase">Tipo</th> {/* Added Type Column */}
-                {showSuggestionCol && <th className="px-4 py-3 text-left text-xs font-medium text-purple-600 uppercase">Sugestão IA</th>}
-                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-right text-xs font-medium uppercase">Sdo. Anterior</th>
-                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-right text-xs font-medium uppercase">Débito</th>
-                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-right text-xs font-medium uppercase">Crédito</th>
-                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-right text-xs font-medium uppercase">Sdo. Atual</th>
-                <th style={{ color: 'var(--theme-header-text)' }} className="px-4 py-3 text-center text-xs font-medium uppercase">Inv.</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-[var(--theme-border)]">
-                  {paginatedAccounts.map((account, index) => {
-                        const isOdd = index % 2 !== 0;
-                        const rowStyle = { backgroundColor: isOdd ? 'var(--theme-row-odd)' : 'var(--theme-row-even)' };
-                        
-                        return (
-                        <tr key={account.originalIndex} style={rowStyle} className={`hover:opacity-90 transition-colors duration-150 ${account.is_synthetic ? 'font-bold' : ''} ${account.possible_inversion && !account.is_synthetic ? 'bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500' : ''}`}>
-                          <td className="px-4 py-3 whitespace-nowrap text-sm font-mono text-blue-600 font-bold">
-                             {account.account_code || '-'}
-                          </td>
-                          <td className="px-4 py-3 text-sm dark:text-slate-800 relative">
-                            <div style={{ paddingLeft: `${(account.level - 1) * 16}px` }}>
-                                {showCorrectedNames ? getDisplayedName(account) : account.account_name}
-                            </div>
-                          </td>
-                          {/* New Type Column Cell */}
-                          <td className="px-4 py-3 text-center text-xs font-bold">
-                              <span className={`px-2 py-1 rounded-full border ${account.type === 'Debit' ? 'bg-blue-100 text-blue-800 border-blue-200' : 'bg-red-100 text-red-800 border-red-200'}`}>
-                                  {account.type === 'Debit' ? 'Débito' : 'Crédito'}
-                              </span>
-                          </td>
-                          {showSuggestionCol && <td className="px-4 py-3 text-sm text-green-600 font-medium">{getSuggestionForAccount(account) || '-'}</td>}
-                          <td className="px-4 py-3 text-right text-sm font-mono text-slate-600">{formatCurrency(account.initial_balance)}</td>
-                          <td className="px-4 py-3 text-right text-sm text-blue-700 font-mono">{account.debit_value > 0 ? formatCurrency(account.debit_value) : '-'}</td>
-                          <td className="px-4 py-3 text-right text-sm text-red-700 font-mono">{account.credit_value > 0 ? formatCurrency(account.credit_value) : '-'}</td>
-                          <td className="px-4 py-3 text-right text-sm font-mono text-slate-800">{formatCurrency(account.final_balance)}</td>
-                          <td className="px-4 py-3 text-center">{account.possible_inversion && !account.is_synthetic && <span className="text-yellow-600 font-bold text-lg">⚠️</span>}</td>
+            <div className="overflow-auto max-h-[600px]">
+                <table className="w-full text-left text-sm">
+                    <thead className="bg-slate-100 dark:bg-slate-900 sticky top-0 z-10">
+                        <tr>
+                            <th className="p-3">Código</th>
+                            <th className="p-3">Conta</th>
+                            <th className="p-3 text-right">Saldo</th>
                         </tr>
-                  )})}
-            </tbody>
-          </table>
-         </div>
+                    </thead>
+                    <tbody className="divide-y dark:divide-slate-700">
+                        {filteredAccounts.map((account, idx) => (
+                            <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-slate-800">
+                                <td className="p-3 text-xs font-mono text-slate-500">{account.account_code}</td>
+                                <td className="p-3">{account.account_name}</td>
+                                <td className={`p-3 text-right font-mono ${account.final_balance < 0 ? 'text-red-500' : 'text-slate-700 dark:text-slate-300'}`}>
+                                    {formatCurrency(account.final_balance)}
+                                </td>
+                            </tr>
+                        ))}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+      )}
+      
+      <div className="bg-slate-900 py-3 px-8 text-right border-t border-slate-800 rounded-b-lg">
+             <span className="text-[9px] font-bold text-slate-500 uppercase tracking-[0.2em]">desenvolvido by - SP Assessoria Contabil.</span>
       </div>
     </div>
   );
