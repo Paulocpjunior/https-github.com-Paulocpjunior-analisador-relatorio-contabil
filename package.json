@@ -15,7 +15,8 @@
     "jspdf": "2.5.1",
     "jspdf-autotable": "3.8.2",
     "xlsx": "latest",
-    "recharts": "2.13.0"
+    "recharts": "2.13.0",
+    "pdf-lib": "1.17.1"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

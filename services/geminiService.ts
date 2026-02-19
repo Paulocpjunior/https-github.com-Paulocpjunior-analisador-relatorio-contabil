@@ -1,6 +1,7 @@
 
 import { GoogleGenAI, GenerateContentResponse, HarmCategory, HarmBlockThreshold, Chat } from "@google/genai";
 import { AnalysisResult, ExtractedAccount, ComparisonRow } from "../types";
+import { PDFDocument } from 'pdf-lib';
 
 // Helper for Exponential Backoff
 async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, baseDelay = 3000): Promise<T> {
@@ -382,6 +383,7 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
   };
 }
 
+// --- NEW PDF CHUNKING LOGIC ---
 async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: string): Promise<{lines: string[], docType: string}> {
     const safetySettings = [
         { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
@@ -395,13 +397,13 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
     OUTPUT FORMAT: "CODE | ACCOUNT NAME | VALUE"
     
     CRITICAL RULES:
-    1. EXTRACT LINE BY LINE.
+    1. EXTRACT LINE BY LINE FROM ALL PROVIDED IMAGES/PAGES.
     2. FORCE PIPE SEPARATOR (|) between Code, Name, and Value.
     3. IGNORE NON-MONETARY COLUMNS (e.g., %, AV, AH, Indicators D/C).
     4. IF MULTIPLE VALUE COLUMNS (e.g., Period 1 | Period 2): EXTRACT ONLY CURRENT PERIOD.
     5. KEEP ORIGINAL NUMBER FORMAT (e.g. 1.000,00).
     6. NO MARKDOWN TABLES, JUST RAW TEXT LINES.
-    7. IGNORE HEADERS/FOOTERS.
+    7. IGNORE HEADERS/FOOTERS. DO NOT SUMMARIZE.
     
     Example:
     3.01 | Receita Vendas | 100.000,00
@@ -414,6 +416,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
         let docType = 'Balancete';
 
         if (mimeType === 'text/csv' || mimeType === 'text/plain' || mimeType === 'application/csv') {
+            // ... (CSV logic remains the same) ...
             const decodedText = safeDecodeBase64(fileBase64);
             const allLines = decodedText.split('\n');
             const CHUNK_SIZE = 600; 
@@ -428,7 +431,46 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
                 }));
                 if (response.text) extractedText += response.text + "\n";
             }
+        } 
+        else if (mimeType === 'application/pdf') {
+            // === PDF CHUNKING STRATEGY ===
+            console.log("Detecting PDF Pages...");
+            const pdfDoc = await PDFDocument.load(fileBase64);
+            const totalPages = pdfDoc.getPageCount();
+            console.log(`PDF has ${totalPages} pages.`);
+
+            const BATCH_SIZE = 4; // Process 4 pages at a time to ensure Gemini doesn't get lazy
+            
+            for (let i = 0; i < totalPages; i += BATCH_SIZE) {
+                const subDoc = await PDFDocument.create();
+                // Copy pages [i ... i+BATCH_SIZE]
+                const pageIndices = [];
+                for(let j = 0; j < BATCH_SIZE && (i + j) < totalPages; j++) {
+                    pageIndices.push(i + j);
+                }
+                
+                const copiedPages = await subDoc.copyPages(pdfDoc, pageIndices);
+                copiedPages.forEach(page => subDoc.addPage(page));
+                
+                const subPdfBase64 = await subDoc.saveAsBase64();
+                console.log(`Processing Batch ${i/BATCH_SIZE + 1} (Pages ${pageIndices.join(', ')})`);
+
+                const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+                    model: 'gemini-3-flash-preview',
+                    contents: { parts: [
+                        { inlineData: { mimeType: 'application/pdf', data: subPdfBase64 } },
+                        { text: basePrompt + `\n\nEXTRACTING BATCH ${i/BATCH_SIZE + 1} of ${Math.ceil(totalPages/BATCH_SIZE)}. EXTRACT EVERY SINGLE ROW.` }
+                    ]},
+                    config: { temperature: 0.0, maxOutputTokens: 8192, safetySettings }
+                }));
+
+                if (response.text) {
+                    extractedText += response.text + "\n";
+                }
+            }
+
         } else {
+            // Excel/Image Fallback (No chunking for Images usually needed)
             const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
                 model: 'gemini-3-flash-preview',
                 contents: { parts: [
