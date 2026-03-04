@@ -3,6 +3,7 @@ export interface HeaderData {
   companyName: string;
   collaboratorName: string;
   cnpj: string;
+  isGroupAnalysis?: boolean;
 }
 
 export interface ExtractedAccount {

@@ -349,6 +349,7 @@ const App: React.FC = () => {
                                 onFilesSelected={(files) => { setSelectedFiles(files); setError(null); }}
                                 isLoading={isLoading}
                                 selectedFileNames={selectedFiles.map(f => f.file.name)}
+                                isGroupAnalysis={headerData.isGroupAnalysis}
                             />
 
                             {error && <div className="p-4 bg-red-50 dark:bg-red-900/10 text-red-700 dark:text-red-400 border border-red-100 dark:border-red-900/30 rounded-2xl mb-6 flex items-center gap-3 font-medium text-sm">
