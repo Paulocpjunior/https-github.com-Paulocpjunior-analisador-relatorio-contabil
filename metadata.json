@@ -1,5 +1,4 @@
-{
   "name": "AuditAI - Analisador Contábil",
-  "description": "Sistema inteligente para análise de documentos contábeis (Balanço, DRE, Balancetes) usando IA para OCR, validação de totais e correção ortográfica.",
+  "description": "Sistema inteligente para análise e CONSOLIDAÇÃO de documentos contábeis de múltiplos grupos econômicos usando IA para OCR e validação.",
   "requestFramePermissions": []
 }
