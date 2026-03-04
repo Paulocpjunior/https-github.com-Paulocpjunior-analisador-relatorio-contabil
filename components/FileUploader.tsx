@@ -1,13 +1,19 @@
 import React, { useCallback, useState } from 'react';
 import * as XLSX from 'xlsx';
 
-interface Props {
-  onFileSelected: (file: File, base64: string, mimeType?: string) => void;
-  isLoading: boolean;
-  selectedFileName?: string;
+export interface UploadedFile {
+  file: File;
+  base64: string;
+  mimeType: string;
 }
 
-const FileUploader: React.FC<Props> = ({ onFileSelected, isLoading, selectedFileName }) => {
+interface Props {
+  onFilesSelected: (files: UploadedFile[]) => void;
+  isLoading: boolean;
+  selectedFileNames?: string[];
+}
+
+const FileUploader: React.FC<Props> = ({ onFilesSelected, isLoading, selectedFileNames }) => {
   const [dragActive, setDragActive] = useState(false);
   const [isReading, setIsReading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -20,116 +26,107 @@ const FileUploader: React.FC<Props> = ({ onFileSelected, isLoading, selectedFile
     else if (e.type === 'dragleave') setDragActive(false);
   }, [isLoading, isReading]);
 
-  const processFile = useCallback((file: File) => {
-    const validTypes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel', 'text/csv', 'text/plain'];
-    // Allow basic checking, but rely on extension as well for safety
-    if (!validTypes.includes(file.type) && !file.name.endsWith('.xlsx') && !file.name.endsWith('.xls') && !file.name.endsWith('.pdf') && !file.name.endsWith('.txt') && !file.name.endsWith('.csv')) {
-        alert("Formato inválido. Use PDF, Excel ou TXT (SPED).");
-        return;
-    }
-
+  const processFiles = useCallback(async (files: FileList | File[]) => {
     setIsReading(true);
     setUploadProgress(0);
 
-    const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
-    const isText = file.type === 'text/plain' || file.name.endsWith('.txt') || file.name.endsWith('.csv');
+    const validTypes = ['application/pdf', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel', 'text/csv', 'text/plain'];
+    
+    const processedFiles: UploadedFile[] = [];
+    let completed = 0;
+    const totalFiles = files.length;
 
-    if (isExcel) {
-        // EXCEL STRATEGY: Parse to CSV locally
-        const reader = new FileReader();
-        reader.onprogress = (data) => {
-             if (data.lengthComputable) setUploadProgress(Math.round((data.loaded / data.total) * 100));
-        };
-        reader.onload = (e) => {
-            try {
-                const data = new Uint8Array(e.target!.result as ArrayBuffer);
-                const workbook = XLSX.read(data, { type: 'array' });
-                const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-                // Convert to CSV
-                const csvOutput = XLSX.utils.sheet_to_csv(firstSheet, { FS: '|' }); // Use pipe separator for better AI parsing
-                
-                // Encode to Base64 (UTF-8 safe)
-                const base64 = btoa(unescape(encodeURIComponent(csvOutput)));
-                
-                setTimeout(() => {
-                    onFileSelected(file, base64, 'text/csv');
-                    setIsReading(false);
-                }, 500);
-            } catch (err) {
-                console.error("Excel Parse Error", err);
-                alert("Erro ao ler arquivo Excel. Tente salvar como PDF.");
-                setIsReading(false);
-            }
-        };
-        reader.readAsArrayBuffer(file);
+    for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        
+        if (!validTypes.includes(file.type) && !file.name.endsWith('.xlsx') && !file.name.endsWith('.xls') && !file.name.endsWith('.pdf') && !file.name.endsWith('.txt') && !file.name.endsWith('.csv')) {
+            alert(`Formato inválido no arquivo ${file.name}. Use PDF, Excel ou TXT (SPED).`);
+            completed++;
+            continue;
+        }
 
-    } else if (isText) {
-        // TXT/SPED STRATEGY: Read as Text, then Base64
-        const reader = new FileReader();
-        reader.onprogress = (data) => {
-            if (data.lengthComputable) setUploadProgress(Math.round((data.loaded / data.total) * 100));
-        };
-        reader.onload = (e) => {
-            try {
-                const textContent = e.target!.result as string;
-                // Encode to Base64 (UTF-8 safe)
-                const base64 = btoa(unescape(encodeURIComponent(textContent)));
-                
-                setTimeout(() => {
-                    onFileSelected(file, base64, 'text/plain');
-                    setIsReading(false);
-                }, 500);
-            } catch (err) {
-                console.error("Text Parse Error", err);
-                alert("Erro ao ler arquivo de texto/SPED.");
-                setIsReading(false);
-            }
-        };
-        reader.readAsText(file); // Default UTF-8
-    } else {
-        // PDF STRATEGY: Base64
-        const reader = new FileReader();
-        reader.onprogress = (data) => {
-            if (data.lengthComputable) setUploadProgress(Math.round((data.loaded / data.total) * 100));
-        };
-        reader.onload = (e) => {
-          if (e.target?.result && typeof e.target.result === 'string') {
-            setUploadProgress(100);
-            
-            // Determine MimeType if missing
-            let mimeType = file.type;
-            if (!mimeType) {
-                if (file.name.toLowerCase().endsWith('.pdf')) mimeType = 'application/pdf';
-            }
+        const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
+        const isText = file.type === 'text/plain' || file.name.endsWith('.txt') || file.name.endsWith('.csv');
 
-            setTimeout(() => {
-                onFileSelected(file, e.target!.result!.toString().split(',')[1], mimeType);
-                setIsReading(false);
-            }, 500);
-          }
-        };
-        reader.onerror = () => {
-            alert("Erro ao ler o arquivo.");
-            setIsReading(false);
-        };
-        reader.readAsDataURL(file);
+        try {
+            const uploadedFile = await new Promise<UploadedFile | null>((resolve, reject) => {
+                if (isExcel) {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        try {
+                            const data = new Uint8Array(e.target!.result as ArrayBuffer);
+                            const workbook = XLSX.read(data, { type: 'array' });
+                            const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+                            const csvOutput = XLSX.utils.sheet_to_csv(firstSheet, { FS: '|' });
+                            const base64 = btoa(unescape(encodeURIComponent(csvOutput)));
+                            resolve({ file, base64, mimeType: 'text/csv' });
+                        } catch (err) {
+                            console.error(`Excel Parse Error: ${file.name}`, err);
+                            resolve(null);
+                        }
+                    };
+                    reader.onerror = () => resolve(null);
+                    reader.readAsArrayBuffer(file);
+                } else if (isText) {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        try {
+                            const textContent = e.target!.result as string;
+                            const base64 = btoa(unescape(encodeURIComponent(textContent)));
+                            resolve({ file, base64, mimeType: 'text/plain' });
+                        } catch (err) {
+                            console.error(`Text Parse Error: ${file.name}`, err);
+                            resolve(null);
+                        }
+                    };
+                    reader.onerror = () => resolve(null);
+                    reader.readAsText(file);
+                } else {
+                    const reader = new FileReader();
+                    reader.onload = (e) => {
+                        if (e.target?.result && typeof e.target.result === 'string') {
+                            let mimeType = file.type;
+                            if (!mimeType && file.name.toLowerCase().endsWith('.pdf')) {
+                                mimeType = 'application/pdf';
+                            }
+                            resolve({ file, base64: e.target.result.split(',')[1], mimeType });
+                        } else {
+                            resolve(null);
+                        }
+                    };
+                    reader.onerror = () => resolve(null);
+                    reader.readAsDataURL(file);
+                }
+            });
+
+            if (uploadedFile) {
+                processedFiles.push(uploadedFile);
+            }
+        } catch (e) {
+             console.error(`Error processing file: ${file.name}`, e);
+        }
+
+        completed++;
+        setUploadProgress(Math.round((completed / totalFiles) * 100));
     }
 
-  }, [onFileSelected]);
+    onFilesSelected(processedFiles);
+    setIsReading(false);
+  }, [onFilesSelected]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     e.stopPropagation();
     setDragActive(false);
     if (isLoading || isReading) return;
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) processFile(e.dataTransfer.files[0]);
-  }, [processFile, isLoading, isReading]);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) processFiles(e.dataTransfer.files);
+  }, [processFiles, isLoading, isReading]);
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     e.preventDefault();
     if (isLoading || isReading) return;
-    if (e.target.files && e.target.files[0]) processFile(e.target.files[0]);
-  }, [processFile, isLoading, isReading]);
+    if (e.target.files && e.target.files.length > 0) processFiles(e.target.files);
+  }, [processFiles, isLoading, isReading]);
 
   const isLocked = isLoading || isReading;
 
@@ -139,11 +136,11 @@ const FileUploader: React.FC<Props> = ({ onFileSelected, isLoading, selectedFile
         htmlFor="file-upload"
         className={`group relative flex flex-col items-center justify-center w-full h-64 border-2 border-dashed rounded-2xl transition-all duration-300 ease-in-out
           ${isLocked ? 'cursor-wait opacity-80 bg-slate-50' : 'cursor-pointer'}
-          ${dragActive ? 'border-blue-500 bg-blue-50 scale-[1.02]' : selectedFileName ? 'border-green-500 bg-green-50/30' : 'border-slate-300 bg-white hover:bg-slate-50 hover:border-blue-400'}
+          ${dragActive ? 'border-blue-500 bg-blue-50 scale-[1.02]' : (selectedFileNames && selectedFileNames.length > 0) ? 'border-green-500 bg-green-50/30' : 'border-slate-300 bg-white hover:bg-slate-50 hover:border-blue-400'}
         `}
         onDragEnter={handleDrag} onDragLeave={handleDrag} onDragOver={handleDrag} onDrop={handleDrop}
       >
-        <div className="flex flex-col items-center justify-center pt-5 pb-6 text-center p-4 w-full">
+        <div className="flex flex-col items-center justify-center pt-5 pb-6 text-center p-4 w-full h-full overflow-y-auto">
           
           {/* READING PROGRESS STATE */}
           {isReading && (
@@ -160,18 +157,22 @@ const FileUploader: React.FC<Props> = ({ onFileSelected, isLoading, selectedFile
           )}
 
           {/* SUCCESS STATE */}
-          {!isReading && selectedFileName ? (
+          {!isReading && selectedFileNames && selectedFileNames.length > 0 ? (
              <div className="animate-scaleIn flex flex-col items-center">
                <div className="bg-green-100 p-4 rounded-full mb-3 relative shadow-sm">
                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" className="w-10 h-10 text-green-600 relative z-10">
                         <path fillRule="evenodd" d="M2.25 12c0-5.385 4.365-9.75 9.75-9.75s9.75 4.365 9.75-9.75-4.365 9.75-9.75 9.75S2.25 17.385 2.25 12zm13.36-1.814a.75.75 0 10-1.22-.872l-3.236 4.53L9.53 12.22a.75.75 0 00-1.06 1.06l2.25 2.25a.75.75 0 001.14-.094l3.75-5.25z" clipRule="evenodd" />
                     </svg>
                </div>
-               <h3 className="text-lg font-bold text-green-800 mb-1">Upload Completo!</h3>
-               <p className="text-slate-600 font-medium mb-1">{selectedFileName}</p>
-               <p className="text-xs text-slate-400 mb-4 bg-white px-2 py-1 rounded border">Arquivo pronto para uso</p>
+               <h3 className="text-lg font-bold text-green-800 mb-1">{selectedFileNames.length > 1 ? 'Uploads Completos!' : 'Upload Completo!'}</h3>
+               <div className="flex flex-wrap items-center justify-center gap-2 max-h-20 overflow-y-auto mb-1">
+                 {selectedFileNames.map((name, i) => (
+                    <span key={i} className="text-xs text-slate-600 font-medium bg-white px-2 py-1 border rounded-md shadow-sm truncate max-w-[150px]">{name}</span>
+                 ))}
+               </div>
+               <p className="text-xs text-slate-400 mb-4">{selectedFileNames.length} arquivo(s) pronto(s) para uso</p>
                
-               <div className="flex items-center gap-2 text-sm text-blue-600 font-bold bg-blue-50 px-3 py-1.5 rounded-full border border-blue-100">
+               <div className="flex items-center gap-2 text-sm text-blue-600 font-bold bg-blue-50 px-3 py-1.5 rounded-full border border-blue-100 mt-2">
                    <span className="relative flex h-3 w-3">
                       <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75"></span>
                       <span className="relative inline-flex rounded-full h-3 w-3 bg-blue-500"></span>
@@ -190,7 +191,7 @@ const FileUploader: React.FC<Props> = ({ onFileSelected, isLoading, selectedFile
             </>
           )}
         </div>
-        <input id="file-upload" type="file" className="hidden" accept=".pdf, .xlsx, .xls, .txt, .csv" onChange={handleChange} disabled={isLocked} />
+        <input id="file-upload" type="file" multiple className="hidden" accept=".pdf, .xlsx, .xls, .txt, .csv" onChange={handleChange} disabled={isLocked} />
       </label>
     </div>
   );
