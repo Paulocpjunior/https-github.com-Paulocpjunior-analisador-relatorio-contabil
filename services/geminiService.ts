@@ -1,7 +1,6 @@
 
 import { GoogleGenAI, GenerateContentResponse, HarmCategory, HarmBlockThreshold, Chat } from "@google/genai";
 import { AnalysisResult, ExtractedAccount, ComparisonRow } from "../types";
-import { PDFDocument } from 'pdf-lib';
 
 // Helper for Exponential Backoff
 async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, baseDelay = 3000): Promise<T> {
