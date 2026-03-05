@@ -26,18 +26,29 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, baseDelay 
 
 function safeDecodeBase64(str: string): string {
     try {
-        return decodeURIComponent(escape(window.atob(str)));
+        // Robust: convert base64 to bytes, then decode as UTF-8
+        const cleaned = str.replace(/[^A-Za-z0-9+/]/g, '');
+        const padded = cleaned + '=='.slice(0, (4 - cleaned.length % 4) % 4);
+        const binary = window.atob(padded);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
     } catch (e) {
-        return window.atob(str);
+        // Last resort: try direct atob
+        try { return window.atob(str); } catch { return ''; }
     }
 }
 
 function base64ToUint8Array(base64: string): Uint8Array {
-    const r = window.atob(base64);
-    const n = r.length;
-    const a = new Uint8Array(n);
-    for (let i = 0; i < n; i++) a[i] = r.charCodeAt(i);
-    return a;
+    // Strip data URL prefix if present
+    const raw = base64.includes(',') ? base64.split(',')[1] : base64;
+    // Pad correctly
+    const padded = raw.replace(/[^A-Za-z0-9+/]/g, '');
+    const withPad = padded + '=='.slice(0, (4 - padded.length % 4) % 4);
+    const binary = window.atob(withPad);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
 }
 
 function parseFinancialNumber(val: any): number {

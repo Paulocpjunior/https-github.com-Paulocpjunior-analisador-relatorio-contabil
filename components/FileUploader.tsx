@@ -1,6 +1,18 @@
 import React, { useCallback, useState } from 'react';
 import * as XLSX from 'xlsx';
 
+// Robust unicode-safe base64 encoding using TextEncoder
+function safeBase64Encode(str: string): string {
+  const bytes = new TextEncoder().encode(str);
+  let binary = '';
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
 export interface UploadedFile {
   file: File;
   base64: string;
@@ -64,9 +76,15 @@ const FileUploader: React.FC<Props> = ({
               try {
                 const data = new Uint8Array(e.target!.result as ArrayBuffer);
                 const workbook = XLSX.read(data, { type: 'array' });
-                const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
-                const csvOutput = XLSX.utils.sheet_to_csv(firstSheet, { FS: '|' });
-                const base64 = btoa(unescape(encodeURIComponent(csvOutput)));
+                // Process all sheets - each sheet may represent a different company
+                const allCsv: string[] = [];
+                workbook.SheetNames.forEach(sheetName => {
+                  const sheet = workbook.Sheets[sheetName];
+                  const csv = XLSX.utils.sheet_to_csv(sheet, { FS: '|' });
+                  if (csv.trim().length > 0) allCsv.push(`=== ABA: ${sheetName} ===\n${csv}`);
+                });
+                const csvOutput = allCsv.join('\n');
+                const base64 = safeBase64Encode(csvOutput);
                 resolve({ file, base64, mimeType: 'text/csv' });
               } catch (err) {
                 console.error(`Excel Parse Error: ${file.name}`, err);
@@ -80,7 +98,7 @@ const FileUploader: React.FC<Props> = ({
             reader.onload = (e) => {
               try {
                 const textContent = e.target!.result as string;
-                const base64 = btoa(unescape(encodeURIComponent(textContent)));
+                const base64 = safeBase64Encode(textContent);
                 resolve({ file, base64, mimeType: 'text/plain' });
               } catch (err) {
                 console.error(`Text Parse Error: ${file.name}`, err);
