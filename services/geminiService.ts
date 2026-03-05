@@ -425,7 +425,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
 
             for (let i = 0; i < chunks.length; i++) {
                 const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                    model: 'gemini-3-flash-preview',
+                    model: 'gemini-2.0-flash',
                     contents: { parts: [{ text: basePrompt + `\n\n--- SEGMENT ${i+1} OF ${chunks.length} ---\n${chunks[i]}\n--- END SEGMENT ---` }]},
                     config: { temperature: 0.0, maxOutputTokens: 8192, safetySettings }
                 }));
@@ -456,7 +456,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
                 console.log(`Processing Batch ${i/BATCH_SIZE + 1} (Pages ${pageIndices.join(', ')})`);
 
                 const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                    model: 'gemini-3-flash-preview',
+                    model: 'gemini-2.0-flash',
                     contents: { parts: [
                         { inlineData: { mimeType: 'application/pdf', data: subPdfBase64 } },
                         { text: basePrompt + `\n\nEXTRACTING BATCH ${i/BATCH_SIZE + 1} of ${Math.ceil(totalPages/BATCH_SIZE)}. EXTRACT EVERY SINGLE ROW.` }
@@ -472,7 +472,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
         } else {
             // Excel/Image Fallback (No chunking for Images usually needed)
             const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                model: 'gemini-3-flash-preview',
+                model: 'gemini-2.0-flash',
                 contents: { parts: [
                     { inlineData: { mimeType: mimeType, data: fileBase64 } },
                     { text: basePrompt + "\n\nEXTRACT EVERYTHING." }
@@ -521,7 +521,7 @@ async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, samp
     `;
     try {
         const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-            model: 'gemini-3-flash-preview',
+            model: 'gemini-2.0-flash',
             contents: { parts: [{ text: prompt }] },
             config: { responseMimeType: "application/json", temperature: 0.4 }
         }));
@@ -560,7 +560,7 @@ export const generateFinancialInsight = async (analysisData: AnalysisResult, use
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
   const topAccounts = (analysisData.accounts || []).filter(a => !a.is_synthetic).sort((a, b) => b.total_value - a.total_value).slice(0, 150).map(a => `${a.account_name}: ${a.final_balance}`).join('\n');
   const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-    model: 'gemini-3-pro-preview',
+    model: 'gemini-1.5-pro',
     contents: { parts: [{ text: `DADOS:\n${topAccounts}\n\nPEDIDO:\n${userPrompt}` }] },
     config: { systemInstruction: `Especialista SP Assessoria. Analise a saúde financeira.`, temperature: 0.4 }
   }));
@@ -572,7 +572,7 @@ export const generateCMVAnalysis = async (analysisData: AnalysisResult, accounti
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const accounts = (analysisData.accounts || []).slice(0, 300).map(a => `${a.account_code} ${a.account_name}: ${a.total_value}`).join('\n');
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-      model: 'gemini-3-pro-preview',
+      model: 'gemini-1.5-pro',
       contents: { parts: [{ text: `Analise CMV:\n${accounts}` }] },
       config: { systemInstruction: `Auditor de Custos SP Assessoria.`, temperature: 0.3 }
     }));
@@ -584,7 +584,7 @@ export const generateSpedComplianceCheck = async (analysisData: AnalysisResult):
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const accounts = (analysisData.accounts || []).slice(0, 250).map(a => `${a.account_code || '?'} | ${a.account_name} | ${a.final_balance}`).join('\n');
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
+        model: 'gemini-1.5-pro',
         contents: { parts: [{ text: `Auditoria SPED:\n\n${accounts}` }] },
         config: { systemInstruction: "Especialista em SPED ECD/ECF SP Assessoria.", temperature: 0.2 }
     }));
@@ -595,7 +595,7 @@ export const chatWithFinancialAgent = async (history: {role: 'user' | 'model', p
     if (!process.env.API_KEY) throw new Error("API Key not found.");
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const chat: Chat = ai.chats.create({
-        model: 'gemini-3-pro-preview',
+        model: 'gemini-1.5-pro',
         history: history,
         config: { systemInstruction: "Assistente contábil sênior SP Assessoria.", tools: [{ googleSearch: {} }] }
     });
@@ -615,7 +615,7 @@ export const generateComparisonAnalysis = async (rows: ComparisonRow[], period1:
         .join('\n');
 
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-        model: 'gemini-3-pro-preview',
+        model: 'gemini-1.5-pro',
         contents: { parts: [{ text: `Analise as variações financeiras entre os períodos ${period1} e ${period2}. Foque nas contas com maiores variações absolutas e percentuais:\n\n${topVariations}` }] },
         config: { 
             systemInstruction: "Você é um Auditor Contábil Senior da SP Assessoria especializado em análise horizontal. Forneça insights detalhados sobre os motivos prováveis das variações e destaque riscos ou anomalias.", 
