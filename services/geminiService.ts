@@ -441,43 +441,21 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
             }
         }
         else if (mimeType === 'application/pdf') {
-            // === PDF CHUNKING STRATEGY ===
-            console.log("Detecting PDF Pages...");
-            const pdfDoc = await PDFDocument.load(base64ToUint8Array(fileBase64));
-            const totalPages = pdfDoc.getPageCount();
-            console.log(`PDF has ${totalPages} pages.`);
-
-            const BATCH_SIZE = 4; // Process 4 pages at a time to ensure Gemini doesn't get lazy
-
-            for (let i = 0; i < totalPages; i += BATCH_SIZE) {
-                const subDoc = await PDFDocument.create();
-                // Copy pages [i ... i+BATCH_SIZE]
-                const pageIndices = [];
-                for (let j = 0; j < BATCH_SIZE && (i + j) < totalPages; j++) {
-                    pageIndices.push(i + j);
-                }
-
-                const copiedPages = await subDoc.copyPages(pdfDoc, pageIndices);
-                copiedPages.forEach(page => subDoc.addPage(page));
-
-                const subPdfBase64 = await subDoc.saveAsBase64();
-                console.log(`Processing Batch ${i / BATCH_SIZE + 1} (Pages ${pageIndices.join(', ')})`);
-
-                const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                    model: 'gemini-2.0-flash',
-                    contents: {
-                        parts: [
-                            { inlineData: { mimeType: 'application/pdf', data: subPdfBase64 } },
-                            { text: basePrompt + `\n\nEXTRACTING BATCH ${i / BATCH_SIZE + 1} of ${Math.ceil(totalPages / BATCH_SIZE)}. EXTRACT EVERY SINGLE ROW.` }
-                        ]
-                    },
-                    config: { temperature: 0.0, maxOutputTokens: 8192, safetySettings }
-                }));
-
-                if (response.text) {
-                    extractedText += response.text + "\n";
-                }
-            }
+            // === DIRECT GEMINI PDF PROCESSING ===
+            // Gemini's vision model natively handles multi-page PDFs.
+            // This approach is more robust than pdf-lib chunking.
+            console.log("Sending PDF directly to Gemini for extraction...");
+            const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+                model: 'gemini-2.0-flash',
+                contents: {
+                    parts: [
+                        { inlineData: { mimeType: 'application/pdf', data: fileBase64 } },
+                        { text: basePrompt + "\n\nEXTRACT EVERY SINGLE ROW FROM ALL PAGES." }
+                    ]
+                },
+                config: { temperature: 0.0, maxOutputTokens: 65000, safetySettings }
+            }));
+            if (response.text) extractedText = response.text;
 
         } else {
             // Excel/Image Fallback (No chunking for Images usually needed)
