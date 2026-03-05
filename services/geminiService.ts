@@ -23,31 +23,40 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, baseDelay 
     }
 }
 
-function safeDecodeBase64(str: string): string {
-    try {
-        // Robust: convert base64 to bytes, then decode as UTF-8
-        const cleaned = str.replace(/[^A-Za-z0-9+/]/g, '');
-        const padded = cleaned + '=='.slice(0, (4 - cleaned.length % 4) % 4);
-        const binary = window.atob(padded);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
-    } catch (e) {
-        // Last resort: try direct atob
-        try { return window.atob(str); } catch { return ''; }
+function customBase64ToUint8Array(base64: string): Uint8Array {
+    const raw = base64.includes(',') ? base64.split(',')[1] : base64;
+    const cleaned = raw.replace(/[^A-Za-z0-9+/]/g, '');
+    const len = cleaned.length;
+    let bufferLength = Math.floor((len * 3) / 4);
+    if (cleaned[len - 1] === '=') bufferLength--;
+    if (cleaned[len - 2] === '=') bufferLength--;
+
+    const bytes = new Uint8Array(bufferLength);
+    const lookup = new Uint8Array(256);
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (let i = 0; i < alphabet.length; i++) lookup[alphabet.charCodeAt(i)] = i;
+
+    let p = 0;
+    for (let i = 0; i < len; i += 4) {
+        const encoded1 = lookup[cleaned.charCodeAt(i)];
+        const encoded2 = lookup[cleaned.charCodeAt(i + 1)];
+        const encoded3 = lookup[cleaned.charCodeAt(i + 2)];
+        const encoded4 = lookup[cleaned.charCodeAt(i + 3)];
+
+        bytes[p++] = (encoded1 << 2) | (encoded2 >> 4);
+        if (p < bufferLength) bytes[p++] = ((encoded2 & 15) << 4) | (encoded3 >> 2);
+        if (p < bufferLength) bytes[p++] = ((encoded3 & 3) << 6) | (encoded4 & 63);
     }
+    return bytes;
 }
 
-function base64ToUint8Array(base64: string): Uint8Array {
-    // Strip data URL prefix if present
-    const raw = base64.includes(',') ? base64.split(',')[1] : base64;
-    // Pad correctly
-    const padded = raw.replace(/[^A-Za-z0-9+/]/g, '');
-    const withPad = padded + '=='.slice(0, (4 - padded.length % 4) % 4);
-    const binary = window.atob(withPad);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes;
+function safeDecodeBase64(str: string): string {
+    try {
+        const bytes = customBase64ToUint8Array(str);
+        return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    } catch (e) {
+        return '';
+    }
 }
 
 function parseFinancialNumber(val: any): number {
