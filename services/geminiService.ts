@@ -467,7 +467,8 @@ async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, samp
 }
 
 export const analyzeDocument = async (fileBase64: string, mimeType: string): Promise<AnalysisResult> => {
-    const apiKey = import.meta.env.VITE_API_KEY;
+    // === CHAVE ALTERADA AQUI ===
+    const apiKey = "AIzaSy_COLE_A_SUA_CHAVE_REAL_AQUI"; 
     if (!apiKey) throw new Error("API Key not found.");
     const ai = new GoogleGenAI({ apiKey });
     
@@ -489,7 +490,8 @@ export const analyzeDocument = async (fileBase64: string, mimeType: string): Pro
 };
 
 export const generateFinancialInsight = async (analysisData: AnalysisResult, userPrompt: string, multiple: number): Promise<string> => {
-    const apiKey = import.meta.env.VITE_API_KEY;
+    // === CHAVE ALTERADA AQUI ===
+    const apiKey = "AIzaSy_COLE_A_SUA_CHAVE_REAL_AQUI";
     if (!apiKey) throw new Error("API Key not found.");
     const ai = new GoogleGenAI({ apiKey });
     
@@ -503,7 +505,8 @@ export const generateFinancialInsight = async (analysisData: AnalysisResult, use
 };
 
 export const generateCMVAnalysis = async (analysisData: AnalysisResult, accountingStandard: string): Promise<string> => {
-    const apiKey = import.meta.env.VITE_API_KEY;
+    // === CHAVE ALTERADA AQUI ===
+    const apiKey = "AIzaSy_COLE_A_SUA_CHAVE_REAL_AQUI";
     if (!apiKey) throw new Error("API Key not found.");
     const ai = new GoogleGenAI({ apiKey });
     
@@ -517,7 +520,8 @@ export const generateCMVAnalysis = async (analysisData: AnalysisResult, accounti
 };
 
 export const generateSpedComplianceCheck = async (analysisData: AnalysisResult): Promise<string> => {
-    const apiKey = import.meta.env.VITE_API_KEY;
+    // === CHAVE ALTERADA AQUI ===
+    const apiKey = "AIzaSy_COLE_A_SUA_CHAVE_REAL_AQUI";
     if (!apiKey) throw new Error("API Key not found.");
     const ai = new GoogleGenAI({ apiKey });
     
@@ -531,7 +535,8 @@ export const generateSpedComplianceCheck = async (analysisData: AnalysisResult):
 };
 
 export const chatWithFinancialAgent = async (history: { role: 'user' | 'model', parts: { text: string }[] }[], message: string) => {
-    const apiKey = import.meta.env.VITE_API_KEY;
+    // === CHAVE ALTERADA AQUI ===
+    const apiKey = "AIzaSy_COLE_A_SUA_CHAVE_REAL_AQUI";
     if (!apiKey) throw new Error("API Key not found.");
     const ai = new GoogleGenAI({ apiKey });
     
@@ -545,7 +550,8 @@ export const chatWithFinancialAgent = async (history: { role: 'user' | 'model', 
 }
 
 export const generateComparisonAnalysis = async (rows: ComparisonRow[], period1: string, period2: string): Promise<string> => {
-    const apiKey = import.meta.env.VITE_API_KEY;
+    // === CHAVE ALTERADA AQUI ===
+    const apiKey = "AIzaSy_COLE_A_SUA_CHAVE_REAL_AQUI";
     if (!apiKey) throw new Error("API Key not found.");
     const ai = new GoogleGenAI({ apiKey });
 
