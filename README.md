@@ -10,7 +10,7 @@ View your app in AI Studio: https://ai.studio/apps/a54487c0-6965-47af-ab52-50480
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
+**Prerequisites:**  Node.js 
 
 
 1. Install dependencies:
