@@ -372,11 +372,10 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
         let extractedText = "";
         let docType = 'Balancete';
 
-        // Com o novo FileUploader, os PDFs chegarão aqui como 'text/plain' já estruturados
         if (mimeType === 'text/csv' || mimeType === 'text/plain' || mimeType === 'application/csv') {
             const decodedText = safeDecodeBase64(fileBase64);
             const allLines = decodedText.split('\n');
-            const CHUNK_SIZE = 400; // Reduzido para evitar timeout no Cloud Run
+            const CHUNK_SIZE = 400; 
             const chunks: string[] = [];
             for (let i = 0; i < allLines.length; i += CHUNK_SIZE) chunks.push(allLines.slice(i, i + CHUNK_SIZE).join('\n'));
 
@@ -390,7 +389,6 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
             }
         }
         else if (mimeType === 'application/pdf') {
-            // Fallback caso o frontend envie o PDF bruto
             console.log("Enviando PDF diretamente para o Gemini (Fallback)...");
             const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
                 model: 'gemini-2.0-flash',
@@ -400,7 +398,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
                         { text: basePrompt + "\n\nIMPORTANTE: Respeite o alinhamento das colunas. Uma conta e seu valor devem ficar na mesma linha." }
                     ]
                 },
-                config: { temperature: 0.1, maxOutputTokens: 65000, safetySettings } // Temperatura levemente maior para evitar loops de alucinação em tabelas
+                config: { temperature: 0.1, maxOutputTokens: 65000, safetySettings }
             }));
             if (response.text) extractedText = response.text;
 
@@ -469,8 +467,10 @@ async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, samp
 }
 
 export const analyzeDocument = async (fileBase64: string, mimeType: string): Promise<AnalysisResult> => {
-    if (!process.env.API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const apiKey = import.meta.env.VITE_API_KEY;
+    if (!apiKey) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey });
+    
     const { lines, docType } = await extractRawData(ai, fileBase64, mimeType);
 
     console.log("Raw Extracted Lines Preview:", lines.slice(0, 5));
@@ -489,8 +489,10 @@ export const analyzeDocument = async (fileBase64: string, mimeType: string): Pro
 };
 
 export const generateFinancialInsight = async (analysisData: AnalysisResult, userPrompt: string, multiple: number): Promise<string> => {
-    if (!process.env.API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const apiKey = import.meta.env.VITE_API_KEY;
+    if (!apiKey) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey });
+    
     const topAccounts = (analysisData.accounts || []).filter(a => !a.is_synthetic).sort((a, b) => b.total_value - a.total_value).slice(0, 150).map(a => `${a.account_name}: ${a.final_balance}`).join('\n');
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
         model: 'gemini-1.5-pro',
@@ -501,8 +503,10 @@ export const generateFinancialInsight = async (analysisData: AnalysisResult, use
 };
 
 export const generateCMVAnalysis = async (analysisData: AnalysisResult, accountingStandard: string): Promise<string> => {
-    if (!process.env.API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const apiKey = import.meta.env.VITE_API_KEY;
+    if (!apiKey) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey });
+    
     const accounts = (analysisData.accounts || []).slice(0, 300).map(a => `${a.account_code} ${a.account_name}: ${a.total_value}`).join('\n');
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
         model: 'gemini-1.5-pro',
@@ -513,8 +517,10 @@ export const generateCMVAnalysis = async (analysisData: AnalysisResult, accounti
 };
 
 export const generateSpedComplianceCheck = async (analysisData: AnalysisResult): Promise<string> => {
-    if (!process.env.API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const apiKey = import.meta.env.VITE_API_KEY;
+    if (!apiKey) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey });
+    
     const accounts = (analysisData.accounts || []).slice(0, 250).map(a => `${a.account_code || '?'} | ${a.account_name} | ${a.final_balance}`).join('\n');
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
         model: 'gemini-1.5-pro',
@@ -525,8 +531,10 @@ export const generateSpedComplianceCheck = async (analysisData: AnalysisResult):
 };
 
 export const chatWithFinancialAgent = async (history: { role: 'user' | 'model', parts: { text: string }[] }[], message: string) => {
-    if (!process.env.API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const apiKey = import.meta.env.VITE_API_KEY;
+    if (!apiKey) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey });
+    
     const chat: Chat = ai.chats.create({
         model: 'gemini-1.5-pro',
         history: history,
@@ -537,8 +545,9 @@ export const chatWithFinancialAgent = async (history: { role: 'user' | 'model', 
 }
 
 export const generateComparisonAnalysis = async (rows: ComparisonRow[], period1: string, period2: string): Promise<string> => {
-    if (!process.env.API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const apiKey = import.meta.env.VITE_API_KEY;
+    if (!apiKey) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey });
 
     const topVariations = rows
         .filter(r => !r.is_synthetic)
