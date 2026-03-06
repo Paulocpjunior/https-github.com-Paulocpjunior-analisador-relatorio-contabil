@@ -11,14 +11,14 @@
   },
   "dependencies": {
     "@google/generative-ai": "^0.21.0",
+    "pdfjs-dist": "4.0.379",
     "jspdf": "2.5.1",
     "jspdf-autotable": "3.8.2",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "recharts": "2.13.0",
     "serve": "^14.2.6",
-    "xlsx": "latest",
-    "pdfjs-dist": "4.0.379"
+    "xlsx": "latest"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",
