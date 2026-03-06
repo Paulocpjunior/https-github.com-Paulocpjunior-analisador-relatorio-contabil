@@ -25,4 +25,8 @@
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }
+}"dependencies": {
+  "pdf-parse": "^1.1.1",
+  "canvas": "^2.11.2",
+  "@google/generative-ai": "^0.1.0"
 }
