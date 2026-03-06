@@ -1,5 +1,9 @@
 import React, { useCallback, useState } from 'react';
 import * as XLSX from 'xlsx';
+import * as pdfjsLib from 'pdfjs-dist';
+
+// Configuração do Worker para rodar no navegador (Vite/React)
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
 // Robust unicode-safe base64 encoding using TextEncoder
 function safeBase64Encode(str: string): string {
@@ -67,16 +71,18 @@ const FileUploader: React.FC<Props> = ({
 
       const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
       const isText = file.type === 'text/plain' || file.name.endsWith('.txt') || file.name.endsWith('.csv');
+      const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+
+      let uploadedFile: UploadedFile | null = null;
 
       try {
-        const uploadedFile = await new Promise<UploadedFile | null>((resolve, reject) => {
-          if (isExcel) {
+        if (isExcel) {
+          uploadedFile = await new Promise<UploadedFile | null>((resolve) => {
             const reader = new FileReader();
             reader.onload = (e) => {
               try {
                 const data = new Uint8Array(e.target!.result as ArrayBuffer);
                 const workbook = XLSX.read(data, { type: 'array' });
-                // Process all sheets - each sheet may represent a different company
                 const allCsv: string[] = [];
                 workbook.SheetNames.forEach(sheetName => {
                   const sheet = workbook.Sheets[sheetName];
@@ -84,8 +90,7 @@ const FileUploader: React.FC<Props> = ({
                   if (csv.trim().length > 0) allCsv.push(`=== ABA: ${sheetName} ===\n${csv}`);
                 });
                 const csvOutput = allCsv.join('\n');
-                const base64 = safeBase64Encode(csvOutput);
-                resolve({ file, base64, mimeType: 'text/csv' });
+                resolve({ file, base64: safeBase64Encode(csvOutput), mimeType: 'text/csv' });
               } catch (err) {
                 console.error(`Excel Parse Error: ${file.name}`, err);
                 resolve(null);
@@ -93,13 +98,14 @@ const FileUploader: React.FC<Props> = ({
             };
             reader.onerror = () => resolve(null);
             reader.readAsArrayBuffer(file);
-          } else if (isText) {
+          });
+        } else if (isText) {
+          uploadedFile = await new Promise<UploadedFile | null>((resolve) => {
             const reader = new FileReader();
             reader.onload = (e) => {
               try {
                 const textContent = e.target!.result as string;
-                const base64 = safeBase64Encode(textContent);
-                resolve({ file, base64, mimeType: 'text/plain' });
+                resolve({ file, base64: safeBase64Encode(textContent), mimeType: 'text/plain' });
               } catch (err) {
                 console.error(`Text Parse Error: ${file.name}`, err);
                 resolve(null);
@@ -107,23 +113,65 @@ const FileUploader: React.FC<Props> = ({
             };
             reader.onerror = () => resolve(null);
             reader.readAsText(file);
-          } else {
+          });
+        } else if (isPdf) {
+          // --- NOVA LÓGICA DE EXTRAÇÃO DE PDF CONTÁBIL ---
+          try {
+            const arrayBuffer = await file.arrayBuffer();
+            const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+            let fullText = "";
+
+            for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+              const page = await pdf.getPage(pageNum);
+              const textContent = await page.getTextContent();
+
+              // Agrupa os itens pela coordenada Y para alinhar colunas da DRE
+              const itemsByY: { [y: string]: string[] } = {};
+              textContent.items.forEach((item: any) => {
+                const y = Math.round(item.transform[5] / 4) * 4; // Margem de tolerância
+                if (!itemsByY[y]) itemsByY[y] = [];
+                itemsByY[y].push(item.str);
+              });
+
+              // Ordena de cima para baixo
+              const yCoords = Object.keys(itemsByY).map(Number).sort((a, b) => b - a);
+              yCoords.forEach(y => {
+                fullText += itemsByY[y].join("   ") + "\n"; // Separa colunas com espaços
+              });
+              fullText += `\n--- Fim da Página ${pageNum} ---\n`;
+            }
+
+            // Converte o texto estruturado para base64 e envia como text/plain
+            uploadedFile = { file, base64: safeBase64Encode(fullText), mimeType: 'text/plain' };
+          } catch (pdfErr) {
+            console.error(`Falha na extração textual do PDF ${file.name}, usando fallback:`, pdfErr);
+            // Fallback: se for uma imagem escaneada, envia o binário bruto como antes
+            uploadedFile = await new Promise<UploadedFile | null>((resolve) => {
+              const reader = new FileReader();
+              reader.onload = (e) => {
+                if (e.target?.result && typeof e.target.result === 'string') {
+                  resolve({ file, base64: e.target.result.split(',')[1], mimeType: 'application/pdf' });
+                } else {
+                  resolve(null);
+                }
+              };
+              reader.readAsDataURL(file);
+            });
+          }
+        } else {
+          uploadedFile = await new Promise<UploadedFile | null>((resolve) => {
             const reader = new FileReader();
             reader.onload = (e) => {
               if (e.target?.result && typeof e.target.result === 'string') {
-                let mimeType = file.type;
-                if (!mimeType && file.name.toLowerCase().endsWith('.pdf')) {
-                  mimeType = 'application/pdf';
-                }
-                resolve({ file, base64: e.target.result.split(',')[1], mimeType });
+                resolve({ file, base64: e.target.result.split(',')[1], mimeType: file.type });
               } else {
                 resolve(null);
               }
             };
             reader.onerror = () => resolve(null);
             reader.readAsDataURL(file);
-          }
-        });
+          });
+        }
 
         if (uploadedFile) {
           processedFiles.push(uploadedFile);
