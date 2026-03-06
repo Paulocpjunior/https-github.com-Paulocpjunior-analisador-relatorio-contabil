@@ -35,5 +35,6 @@
     "xlsx": "latest",
     "jspdf": "2.5.1",
     "jspdf-autotable": "3.8.2"
+  "pdfjs-dist": "4.0.379",
   },
   }
