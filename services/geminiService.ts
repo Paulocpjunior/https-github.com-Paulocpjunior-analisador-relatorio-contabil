@@ -1,116 +1,82 @@
 
 import { GoogleGenAI, GenerateContentResponse, HarmCategory, HarmBlockThreshold, Chat } from "@google/genai";
 import { AnalysisResult, ExtractedAccount, ComparisonRow } from "../types";
+import { PDFDocument } from 'pdf-lib';
 
 // Helper for Exponential Backoff
 async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, baseDelay = 3000): Promise<T> {
-    try {
-        return await fn();
-    } catch (error: any) {
-        const message = error?.message || '';
-        const status = error?.status || error?.code;
-
-        // Do NOT retry on client errors: invalid API key, bad request, not found, auth errors
-        const isClientError =
-            status === 400 || status === 401 || status === 403 || status === 404 ||
-            message.includes('400') || message.includes('401') || message.includes('403') ||
-            message.includes('404') || message.includes('not found') ||
-            message.includes('API_KEY_INVALID') || message.includes('API key not valid');
-
-        if (isClientError) {
-            throw error;
-        }
-
-        if (retries > 0) {
-            console.warn(`API Error (${status}). Retrying in ${baseDelay}ms...`);
-            await new Promise(resolve => setTimeout(resolve, baseDelay));
-            return retryWithBackoff(fn, retries - 1, baseDelay * 2);
-        }
+  try {
+    return await fn();
+  } catch (error: any) {
+    const message = error?.message || '';
+    const status = error?.status || error?.code;
+    
+    if (message.includes('404') || message.includes('not found')) {
         throw error;
     }
-}
 
-function customBase64ToUint8Array(base64: string): Uint8Array {
-    const raw = base64.includes(',') ? base64.split(',')[1] : base64;
-    const cleaned = raw.replace(/[^A-Za-z0-9+/]/g, '');
-    const len = cleaned.length;
-    let bufferLength = Math.floor((len * 3) / 4);
-    if (cleaned[len - 1] === '=') bufferLength--;
-    if (cleaned[len - 2] === '=') bufferLength--;
-
-    const bytes = new Uint8Array(bufferLength);
-    const lookup = new Uint8Array(256);
-    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    for (let i = 0; i < alphabet.length; i++) lookup[alphabet.charCodeAt(i)] = i;
-
-    let p = 0;
-    for (let i = 0; i < len; i += 4) {
-        const encoded1 = lookup[cleaned.charCodeAt(i)];
-        const encoded2 = lookup[cleaned.charCodeAt(i + 1)];
-        const encoded3 = lookup[cleaned.charCodeAt(i + 2)];
-        const encoded4 = lookup[cleaned.charCodeAt(i + 3)];
-
-        bytes[p++] = (encoded1 << 2) | (encoded2 >> 4);
-        if (p < bufferLength) bytes[p++] = ((encoded2 & 15) << 4) | (encoded3 >> 2);
-        if (p < bufferLength) bytes[p++] = ((encoded3 & 3) << 6) | (encoded4 & 63);
+    if (retries > 0) {
+      console.warn(`API Error (${status}). Retrying in ${baseDelay}ms...`);
+      await new Promise(resolve => setTimeout(resolve, baseDelay));
+      return retryWithBackoff(fn, retries - 1, baseDelay * 2);
     }
-    return bytes;
+    throw error;
+  }
 }
 
 function safeDecodeBase64(str: string): string {
     try {
-        const bytes = customBase64ToUint8Array(str);
-        return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+        return decodeURIComponent(escape(window.atob(str)));
     } catch (e) {
-        return '';
+        return window.atob(str);
     }
 }
 
 function parseFinancialNumber(val: any): number {
-    if (typeof val === 'number') return val;
-    if (!val) return 0;
+  if (typeof val === 'number') return val;
+  if (!val) return 0;
+  
+  let clean = String(val).trim();
+  
+  // Quick return for empty or non-numeric looking strings
+  if (!clean || clean === '-' || clean === '–') return 0;
 
-    let clean = String(val).trim();
+  // Remove currency symbols and common noise
+  clean = clean.replace(/^R\$\s?/, '').replace(/\s/g, ''); 
 
-    // Quick return for empty or non-numeric looking strings
-    if (!clean || clean === '-' || clean === '–') return 0;
+  // Fix common OCR errors
+  clean = clean.replace(/O/gi, '0')
+               .replace(/l/g, '1')
+               .replace(/[^0-9.,\-()]/g, ''); 
 
-    // Remove currency symbols and common noise
-    clean = clean.replace(/^R\$\s?/, '').replace(/\s/g, '');
+  // Handle Parentheses as Negative
+  const isNegativeParens = /^\(.*\)$/.test(clean);
+  if (isNegativeParens) {
+      clean = clean.replace(/[()]/g, '');
+  }
 
-    // Fix common OCR errors
-    clean = clean.replace(/O/gi, '0')
-        .replace(/l/g, '1')
-        .replace(/[^0-9.,\-()]/g, '');
+  // IMPORTANT: Brazilian Format Detection (1.000,00) vs US (1,000.00)
+  const lastDotIndex = clean.lastIndexOf('.');
+  const lastCommaIndex = clean.lastIndexOf(',');
 
-    // Handle Parentheses as Negative
-    const isNegativeParens = /^\(.*\)$/.test(clean);
-    if (isNegativeParens) {
-        clean = clean.replace(/[()]/g, '');
-    }
+  if (lastCommaIndex > lastDotIndex) {
+      // Brazilian format: remove dots, replace comma with dot
+      clean = clean.replace(/\./g, '').replace(',', '.');
+  } else if (lastDotIndex > lastCommaIndex) {
+      // US format: remove commas
+      clean = clean.replace(/,/g, '');
+  } else {
+      // No separator or only one type. 
+      // If it has a comma, treat as decimal separator (common in BR)
+      if (clean.includes(',')) clean = clean.replace(',', '.');
+  }
 
-    // IMPORTANT: Brazilian Format Detection (1.000,00) vs US (1,000.00)
-    const lastDotIndex = clean.lastIndexOf('.');
-    const lastCommaIndex = clean.lastIndexOf(',');
-
-    if (lastCommaIndex > lastDotIndex) {
-        // Brazilian format: remove dots, replace comma with dot
-        clean = clean.replace(/\./g, '').replace(',', '.');
-    } else if (lastDotIndex > lastCommaIndex) {
-        // US format: remove commas
-        clean = clean.replace(/,/g, '');
-    } else {
-        // No separator or only one type. 
-        // If it has a comma, treat as decimal separator (common in BR)
-        if (clean.includes(',')) clean = clean.replace(',', '.');
-    }
-
-    let num = parseFloat(clean);
-
-    if (isNaN(num)) return 0;
-    if (isNegativeParens) num = -Math.abs(num);
-
-    return num;
+  let num = parseFloat(clean);
+  
+  if (isNaN(num)) return 0;
+  if (isNegativeParens) num = -Math.abs(num);
+  
+  return num;
 }
 
 function checkInversion(name: string, type: 'Debit' | 'Credit', finalBalance: number, indicator: string | null, code: string): boolean {
@@ -133,10 +99,10 @@ function checkInversion(name: string, type: 'Debit' | 'Credit', finalBalance: nu
         if (indicator.toUpperCase() === 'D') actualNature = 'Debit';
         if (indicator.toUpperCase() === 'C') actualNature = 'Credit';
     } else {
-        if (finalBalance < 0) actualNature = 'Credit';
+        if (finalBalance < 0) actualNature = 'Credit'; 
     }
 
-    if (expectedNature !== 'Unknown') return false;
+    if (expectedNature !== 'Unknown') return false; 
     return false;
 }
 
@@ -147,13 +113,13 @@ function mapValuesToColumns(numbers: number[], docType: string): { initial: numb
     // --- DRE SPECIFIC LOGIC ---
     if (docType === 'DRE') {
         if (count > 0) {
-            // For DRE, usually the last valid number is the accumulated or relevant period result in single-column extractions.
-            // However, our prompt asks to prioritize current period.
-            // Let's take the LAST number found if multiple exist, assuming column order [Period 1] [Period 2] ...
-            // Or if pipe extraction is clean, index 0 is what we want.
-            // Safe bet: The number with the highest absolute value is likely the Total.
-            // Actually, strict index 0 is safer if the prompt is obeyed.
-            final = numbers[0];
+             // For DRE, usually the last valid number is the accumulated or relevant period result in single-column extractions.
+             // However, our prompt asks to prioritize current period.
+             // Let's take the LAST number found if multiple exist, assuming column order [Period 1] [Period 2] ...
+             // Or if pipe extraction is clean, index 0 is what we want.
+             // Safe bet: The number with the highest absolute value is likely the Total.
+             // Actually, strict index 0 is safer if the prompt is obeyed.
+             final = numbers[0];
         }
         return { initial, debit, credit, final };
     }
@@ -174,251 +140,251 @@ function mapValuesToColumns(numbers: number[], docType: string): { initial: numb
         credit = numbers[2];
         final = numbers[3];
     }
-
+    
     return { initial, debit, credit, final };
 }
 
 function normalizeFinancialData(rawLines: string[], docType: string): AnalysisResult {
-    const accounts: ExtractedAccount[] = [];
+  const accounts: ExtractedAccount[] = [];
+  
+  rawLines.forEach(line => {
+      let cleanLine = line.trim();
+      if (!cleanLine || cleanLine.length < 5) return;
+      
+      // Filter out likely headers
+      if (/^(doctype|data|conta|descri|saldo|débito|crédito|página|page|cod|cód|movimento|transporte|historico|empresa|cnpj)/i.test(cleanLine)) return;
+      // Filter markdown table separators
+      if (/^\|?[\s-]+\|?$/.test(cleanLine)) return;
 
-    rawLines.forEach(line => {
-        let cleanLine = line.trim();
-        if (!cleanLine || cleanLine.length < 5) return;
+      let code = '';
+      let name = '';
+      let valuesPart: number[] = [];
+      let type: 'Debit' | 'Credit' = 'Debit'; // Default
 
-        // Filter out likely headers
-        if (/^(doctype|data|conta|descri|saldo|débito|crédito|página|page|cod|cód|movimento|transporte|historico|empresa|cnpj)/i.test(cleanLine)) return;
-        // Filter markdown table separators
-        if (/^\|?[\s-]+\|?$/.test(cleanLine)) return;
+      // --- STRATEGY 1: PIPE SEPARATOR (Preferred) ---
+      if (cleanLine.includes('|')) {
+          // Robust split: trim and remove empty parts (common in markdown "| val |" -> ["", "val", ""])
+          const parts = cleanLine.split('|').map(p => p.trim()).filter(p => p.length > 0);
+          
+          if (parts.length >= 2) {
+              const firstLooksLikeCode = /^[\d.-]+$/.test(parts[0]) && parts[0].length < 20;
+              
+              if (firstLooksLikeCode) {
+                  code = parts[0];
+                  name = parts[1];
+                  for (let i = 2; i < parts.length; i++) {
+                      // Filter out known non-value columns like "D", "C", "%"
+                      if (/^[DC%]$/i.test(parts[i])) continue;
+                      const val = parseFinancialNumber(parts[i]);
+                      valuesPart.push(val);
+                  }
+              } else {
+                  // No Code, just Name | Value
+                  name = parts[0];
+                  for (let i = 1; i < parts.length; i++) {
+                      if (/^[DC%]$/i.test(parts[i])) continue;
+                      valuesPart.push(parseFinancialNumber(parts[i]));
+                  }
+              }
+          }
+      } 
+      
+      // --- STRATEGY 2: REVERSE PARSING (Fallback) ---
+      if (valuesPart.length === 0) {
+          // Clean common separator noise
+          cleanLine = cleanLine.replace(/\.{3,}/g, ' '); // Replace .... with space
 
-        let code = '';
-        let name = '';
-        let valuesPart: number[] = [];
-        let type: 'Debit' | 'Credit' = 'Debit'; // Default
+          const tokens = cleanLine.split(/\s+/);
+          const foundNumbers: number[] = [];
+          let lastTokenIndex = tokens.length - 1;
+          let numbersFoundCount = 0;
 
-        // --- STRATEGY 1: PIPE SEPARATOR (Preferred) ---
-        if (cleanLine.includes('|')) {
-            // Robust split: trim and remove empty parts (common in markdown "| val |" -> ["", "val", ""])
-            const parts = cleanLine.split('|').map(p => p.trim()).filter(p => p.length > 0);
+          while (lastTokenIndex >= 0 && numbersFoundCount < 4) {
+              const token = tokens[lastTokenIndex];
+              
+              // Skip indicators
+              if (/^[DC%]$/i.test(token)) {
+                  lastTokenIndex--;
+                  continue;
+              }
 
-            if (parts.length >= 2) {
-                const firstLooksLikeCode = /^[\d.-]+$/.test(parts[0]) && parts[0].length < 20;
+              // Check if it looks strictly like a financial number
+              if (/^[\d.,\-()]+$/.test(token) && /\d/.test(token)) {
+                  const val = parseFinancialNumber(token);
+                  foundNumbers.unshift(val);
+                  numbersFoundCount++;
+                  lastTokenIndex--;
+              } else {
+                  // If we hit a word, stop (unless it's R$)
+                  if (token.toUpperCase() === 'R$') {
+                      lastTokenIndex--;
+                  } else {
+                      break; 
+                  }
+              }
+          }
 
-                if (firstLooksLikeCode) {
-                    code = parts[0];
-                    name = parts[1];
-                    for (let i = 2; i < parts.length; i++) {
-                        // Filter out known non-value columns like "D", "C", "%"
-                        if (/^[DC%]$/i.test(parts[i])) continue;
-                        const val = parseFinancialNumber(parts[i]);
-                        valuesPart.push(val);
-                    }
-                } else {
-                    // No Code, just Name | Value
-                    name = parts[0];
-                    for (let i = 1; i < parts.length; i++) {
-                        if (/^[DC%]$/i.test(parts[i])) continue;
-                        valuesPart.push(parseFinancialNumber(parts[i]));
-                    }
-                }
-            }
-        }
+          if (foundNumbers.length > 0) {
+              valuesPart = foundNumbers;
+              const nameTokens = tokens.slice(0, lastTokenIndex + 1);
+              if (nameTokens.length > 0) {
+                  if (/^[\d.-]+$/.test(nameTokens[0])) {
+                      code = nameTokens[0];
+                      name = nameTokens.slice(1).join(' ');
+                  } else {
+                      name = nameTokens.join(' ');
+                  }
+              }
+          }
+      }
 
-        // --- STRATEGY 2: REVERSE PARSING (Fallback) ---
-        if (valuesPart.length === 0) {
-            // Clean common separator noise
-            cleanLine = cleanLine.replace(/\.{3,}/g, ' '); // Replace .... with space
+      // Cleanup Name
+      name = name.replace(/[.|]{2,}/g, '').trim(); 
+      if (!name || name.length < 2 || valuesPart.length === 0) return;
 
-            const tokens = cleanLine.split(/\s+/);
-            const foundNumbers: number[] = [];
-            let lastTokenIndex = tokens.length - 1;
-            let numbersFoundCount = 0;
+      // Determine Type (Debit/Credit) mainly for DRE logic
+      const lowerName = name.toLowerCase();
+      
+      if (code.startsWith('2') || code.startsWith('3') || code.startsWith('6') || 
+          lowerName.includes('passivo') || lowerName.includes('fornecedor') || 
+          lowerName.includes('receita') || lowerName.includes('patrimônio') || lowerName.includes('capital') || 
+          lowerName.includes('lucro') || lowerName.includes('vendas')) {
+          type = 'Credit';
+      }
+      
+      if (docType === 'DRE') {
+          if (lowerName.includes('custo') || lowerName.includes('despesa') || lowerName.includes('imposto') || lowerName.includes('cmv')) {
+              type = 'Debit';
+          }
+      }
 
-            while (lastTokenIndex >= 0 && numbersFoundCount < 4) {
-                const token = tokens[lastTokenIndex];
+      const values = mapValuesToColumns(valuesPart, docType);
+      const cleanCode = code.endsWith('.') ? code.slice(0, -1) : code;
 
-                // Skip indicators
-                if (/^[DC%]$/i.test(token)) {
-                    lastTokenIndex--;
-                    continue;
-                }
+      let category = null;
+      if (docType === 'DRE' || code.startsWith('3') || code.startsWith('4') || code.startsWith('5')) {
+           if (lowerName.includes('receita') || lowerName.includes('custo') || lowerName.includes('despesa') || code.startsWith('3') || code.startsWith('4')) category = 'Operacional';
+           else if (lowerName.includes('invest') || lowerName.includes('imobiliz')) category = 'Investimento';
+           else if (lowerName.includes('juro') || lowerName.includes('financ')) category = 'Financiamento';
+           else category = 'Operacional';
+      }
 
-                // Check if it looks strictly like a financial number
-                if (/^[\d.,\-()]+$/.test(token) && /\d/.test(token)) {
-                    const val = parseFinancialNumber(token);
-                    foundNumbers.unshift(val);
-                    numbersFoundCount++;
-                    lastTokenIndex--;
-                } else {
-                    // If we hit a word, stop (unless it's R$)
-                    if (token.toUpperCase() === 'R$') {
-                        lastTokenIndex--;
-                    } else {
-                        break;
-                    }
-                }
-            }
+      let finalBal = values.final;
+      
+      if (docType === 'DRE') {
+          if (values.debit === 0 && values.credit === 0) {
+              if (type === 'Debit') values.debit = Math.abs(finalBal);
+              else values.credit = Math.abs(finalBal);
+          }
+          if (type === 'Debit') finalBal = -Math.abs(finalBal);
+          else finalBal = Math.abs(finalBal);
+      } else {
+          if (finalBal === 0 && (values.debit !== 0 || values.credit !== 0)) {
+             finalBal = values.debit - values.credit;
+          }
+      }
 
-            if (foundNumbers.length > 0) {
-                valuesPart = foundNumbers;
-                const nameTokens = tokens.slice(0, lastTokenIndex + 1);
-                if (nameTokens.length > 0) {
-                    if (/^[\d.-]+$/.test(nameTokens[0])) {
-                        code = nameTokens[0];
-                        name = nameTokens.slice(1).join(' ');
-                    } else {
-                        name = nameTokens.join(' ');
-                    }
-                }
-            }
-        }
+      const possibleInversion = checkInversion(name, type, finalBal, null, cleanCode);
 
-        // Cleanup Name
-        name = name.replace(/[.|]{2,}/g, '').trim();
-        if (!name || name.length < 2 || valuesPart.length === 0) return;
+      accounts.push({
+          account_code: cleanCode,
+          account_name: name,
+          initial_balance: values.initial,
+          debit_value: values.debit,
+          credit_value: values.credit,
+          final_balance: finalBal,
+          total_value: Math.abs(finalBal),
+          type,
+          possible_inversion: possibleInversion,
+          ifrs18_category: category as any,
+          level: 1, 
+          is_synthetic: false
+      });
+  });
 
-        // Determine Type (Debit/Credit) mainly for DRE logic
-        const lowerName = name.toLowerCase();
+  // Post-processing hierarchy
+  accounts.sort((a, b) => {
+      if (!a.account_code) return 1;
+      if (!b.account_code) return -1;
+      return a.account_code.localeCompare(b.account_code, undefined, { numeric: true, sensitivity: 'base' });
+  });
 
-        if (code.startsWith('2') || code.startsWith('3') || code.startsWith('6') ||
-            lowerName.includes('passivo') || lowerName.includes('fornecedor') ||
-            lowerName.includes('receita') || lowerName.includes('patrimônio') || lowerName.includes('capital') ||
-            lowerName.includes('lucro') || lowerName.includes('vendas')) {
-            type = 'Credit';
-        }
+  accounts.forEach((acc, idx) => {
+      if (acc.account_code) {
+          acc.level = acc.account_code.split(/[.-]/).filter(x => x.length > 0).length;
+          const myCode = acc.account_code;
+          let isParent = false;
+          const nextAcc = accounts[idx + 1];
+          if (nextAcc && nextAcc.account_code && nextAcc.account_code.startsWith(myCode)) {
+               const charAfter = nextAcc.account_code[myCode.length];
+               if (charAfter === '.' || charAfter === '-' || charAfter === undefined) isParent = true;
+          }
+          acc.is_synthetic = isParent;
+      } else if (acc.account_name.toLowerCase().startsWith('total') || acc.account_name.toLowerCase().startsWith('grupo') || acc.account_name.toLowerCase().startsWith('resultado')) {
+          acc.is_synthetic = true;
+      }
+  });
 
-        if (docType === 'DRE') {
-            if (lowerName.includes('custo') || lowerName.includes('despesa') || lowerName.includes('imposto') || lowerName.includes('cmv')) {
-                type = 'Debit';
-            }
-        }
+  const analyticalAccounts = accounts.filter(a => !a.is_synthetic);
+  const calcAccounts = analyticalAccounts.length > 0 ? analyticalAccounts : accounts.filter(a => !a.account_name.toLowerCase().includes('total'));
+  
+  const total_debits = calcAccounts.reduce((sum, a) => sum + Math.abs(a.debit_value), 0);
+  const total_credits = calcAccounts.reduce((sum, a) => sum + Math.abs(a.credit_value), 0);
+  const discrepancy = Math.abs(total_debits - total_credits);
 
-        const values = mapValuesToColumns(valuesPart, docType);
-        const cleanCode = code.endsWith('.') ? code.slice(0, -1) : code;
+  let calculatedResult = 0;
+  let resultLabel = 'Resultado do Período';
 
-        let category = null;
-        if (docType === 'DRE' || code.startsWith('3') || code.startsWith('4') || code.startsWith('5')) {
-            if (lowerName.includes('receita') || lowerName.includes('custo') || lowerName.includes('despesa') || code.startsWith('3') || code.startsWith('4')) category = 'Operacional';
-            else if (lowerName.includes('invest') || lowerName.includes('imobiliz')) category = 'Investimento';
-            else if (lowerName.includes('juro') || lowerName.includes('financ')) category = 'Financiamento';
-            else category = 'Operacional';
-        }
+  if (docType === 'DRE') {
+      const revenue = analyticalAccounts.filter(a => a.type === 'Credit').reduce((sum, a) => sum + Math.abs(a.final_balance), 0);
+      const expenses = analyticalAccounts.filter(a => a.type === 'Debit').reduce((sum, a) => sum + Math.abs(a.final_balance), 0);
+      calculatedResult = revenue - expenses;
+      resultLabel = calculatedResult >= 0 ? 'Lucro Líquido Apurado' : 'Prejuízo Líquido Apurado';
+  } else {
+      let revenueSum = 0, expenseSum = 0;
+      analyticalAccounts.forEach(acc => {
+          if (acc.account_code) {
+              const firstChar = acc.account_code.charAt(0);
+              if (['3', '4', '5', '6', '7'].includes(firstChar)) {
+                  if (acc.type === 'Credit') revenueSum += Math.abs(acc.final_balance);
+                  if (acc.type === 'Debit') expenseSum += Math.abs(acc.final_balance);
+              }
+          } else {
+             const lower = acc.account_name.toLowerCase();
+             if ((lower.includes('receita') || lower.includes('faturamento')) && acc.type === 'Credit') { revenueSum += Math.abs(acc.final_balance); }
+             if ((lower.includes('despesa') || lower.includes('custo')) && acc.type === 'Debit') { expenseSum += Math.abs(acc.final_balance); }
+          }
+      });
+      calculatedResult = revenueSum - expenseSum;
+      
+      if (Math.abs(calculatedResult) < 0.01) {
+           const resultAccount = analyticalAccounts.find(a => /lucro\s+l[ií]quido|preju[ií]zo\s+l[ií]quido/i.test(a.account_name));
+           if (resultAccount) {
+               calculatedResult = resultAccount.final_balance;
+               resultLabel = resultAccount.account_name;
+           }
+      }
+  }
 
-        let finalBal = values.final;
-
-        if (docType === 'DRE') {
-            if (values.debit === 0 && values.credit === 0) {
-                if (type === 'Debit') values.debit = Math.abs(finalBal);
-                else values.credit = Math.abs(finalBal);
-            }
-            if (type === 'Debit') finalBal = -Math.abs(finalBal);
-            else finalBal = Math.abs(finalBal);
-        } else {
-            if (finalBal === 0 && (values.debit !== 0 || values.credit !== 0)) {
-                finalBal = values.debit - values.credit;
-            }
-        }
-
-        const possibleInversion = checkInversion(name, type, finalBal, null, cleanCode);
-
-        accounts.push({
-            account_code: cleanCode,
-            account_name: name,
-            initial_balance: values.initial,
-            debit_value: values.debit,
-            credit_value: values.credit,
-            final_balance: finalBal,
-            total_value: Math.abs(finalBal),
-            type,
-            possible_inversion: possibleInversion,
-            ifrs18_category: category as any,
-            level: 1,
-            is_synthetic: false
-        });
-    });
-
-    // Post-processing hierarchy
-    accounts.sort((a, b) => {
-        if (!a.account_code) return 1;
-        if (!b.account_code) return -1;
-        return a.account_code.localeCompare(b.account_code, undefined, { numeric: true, sensitivity: 'base' });
-    });
-
-    accounts.forEach((acc, idx) => {
-        if (acc.account_code) {
-            acc.level = acc.account_code.split(/[.-]/).filter(x => x.length > 0).length;
-            const myCode = acc.account_code;
-            let isParent = false;
-            const nextAcc = accounts[idx + 1];
-            if (nextAcc && nextAcc.account_code && nextAcc.account_code.startsWith(myCode)) {
-                const charAfter = nextAcc.account_code[myCode.length];
-                if (charAfter === '.' || charAfter === '-' || charAfter === undefined) isParent = true;
-            }
-            acc.is_synthetic = isParent;
-        } else if (acc.account_name.toLowerCase().startsWith('total') || acc.account_name.toLowerCase().startsWith('grupo') || acc.account_name.toLowerCase().startsWith('resultado')) {
-            acc.is_synthetic = true;
-        }
-    });
-
-    const analyticalAccounts = accounts.filter(a => !a.is_synthetic);
-    const calcAccounts = analyticalAccounts.length > 0 ? analyticalAccounts : accounts.filter(a => !a.account_name.toLowerCase().includes('total'));
-
-    const total_debits = calcAccounts.reduce((sum, a) => sum + Math.abs(a.debit_value), 0);
-    const total_credits = calcAccounts.reduce((sum, a) => sum + Math.abs(a.credit_value), 0);
-    const discrepancy = Math.abs(total_debits - total_credits);
-
-    let calculatedResult = 0;
-    let resultLabel = 'Resultado do Período';
-
-    if (docType === 'DRE') {
-        const revenue = analyticalAccounts.filter(a => a.type === 'Credit').reduce((sum, a) => sum + Math.abs(a.final_balance), 0);
-        const expenses = analyticalAccounts.filter(a => a.type === 'Debit').reduce((sum, a) => sum + Math.abs(a.final_balance), 0);
-        calculatedResult = revenue - expenses;
-        resultLabel = calculatedResult >= 0 ? 'Lucro Líquido Apurado' : 'Prejuízo Líquido Apurado';
-    } else {
-        let revenueSum = 0, expenseSum = 0;
-        analyticalAccounts.forEach(acc => {
-            if (acc.account_code) {
-                const firstChar = acc.account_code.charAt(0);
-                if (['3', '4', '5', '6', '7'].includes(firstChar)) {
-                    if (acc.type === 'Credit') revenueSum += Math.abs(acc.final_balance);
-                    if (acc.type === 'Debit') expenseSum += Math.abs(acc.final_balance);
-                }
-            } else {
-                const lower = acc.account_name.toLowerCase();
-                if ((lower.includes('receita') || lower.includes('faturamento')) && acc.type === 'Credit') { revenueSum += Math.abs(acc.final_balance); }
-                if ((lower.includes('despesa') || lower.includes('custo')) && acc.type === 'Debit') { expenseSum += Math.abs(acc.final_balance); }
-            }
-        });
-        calculatedResult = revenueSum - expenseSum;
-
-        if (Math.abs(calculatedResult) < 0.01) {
-            const resultAccount = analyticalAccounts.find(a => /lucro\s+l[ií]quido|preju[ií]zo\s+l[ií]quido/i.test(a.account_name));
-            if (resultAccount) {
-                calculatedResult = resultAccount.final_balance;
-                resultLabel = resultAccount.account_name;
-            }
-        }
-    }
-
-    return {
-        summary: {
-            document_type: docType as any,
-            period: 'A definir',
-            total_debits,
-            total_credits,
-            is_balanced: docType === 'DRE' ? true : discrepancy < 1.0,
-            discrepancy_amount: discrepancy,
-            observations: [],
-            specific_result_value: calculatedResult,
-            specific_result_label: resultLabel
-        },
-        accounts,
-        spell_check: []
-    };
+  return {
+      summary: {
+          document_type: docType as any,
+          period: 'A definir',
+          total_debits,
+          total_credits,
+          is_balanced: docType === 'DRE' ? true : discrepancy < 1.0,
+          discrepancy_amount: discrepancy,
+          observations: [],
+          specific_result_value: calculatedResult,
+          specific_result_label: resultLabel
+      },
+      accounts,
+      spell_check: []
+  };
 }
 
 // --- NEW PDF CHUNKING LOGIC ---
-async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: string): Promise<{ lines: string[], docType: string }> {
+async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: string): Promise<{lines: string[], docType: string}> {
     const safetySettings = [
         { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
         { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
@@ -453,63 +419,81 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
             // ... (CSV logic remains the same) ...
             const decodedText = safeDecodeBase64(fileBase64);
             const allLines = decodedText.split('\n');
-            const CHUNK_SIZE = 600;
+            const CHUNK_SIZE = 600; 
             const chunks: string[] = [];
             for (let i = 0; i < allLines.length; i += CHUNK_SIZE) chunks.push(allLines.slice(i, i + CHUNK_SIZE).join('\n'));
 
             for (let i = 0; i < chunks.length; i++) {
                 const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                    model: 'gemini-2.0-flash',
-                    contents: { parts: [{ text: basePrompt + `\n\n--- SEGMENT ${i + 1} OF ${chunks.length} ---\n${chunks[i]}\n--- END SEGMENT ---` }] },
+                    model: 'gemini-3-flash-preview',
+                    contents: { parts: [{ text: basePrompt + `\n\n--- SEGMENT ${i+1} OF ${chunks.length} ---\n${chunks[i]}\n--- END SEGMENT ---` }]},
                     config: { temperature: 0.0, maxOutputTokens: 8192, safetySettings }
                 }));
                 if (response.text) extractedText += response.text + "\n";
             }
-        }
+        } 
         else if (mimeType === 'application/pdf') {
-            // === DIRECT GEMINI PDF PROCESSING ===
-            // Gemini's vision model natively handles multi-page PDFs.
-            // This approach is more robust than pdf-lib chunking.
-            console.log("Sending PDF directly to Gemini for extraction...");
-            const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                model: 'gemini-2.0-flash',
-                contents: {
-                    parts: [
-                        { inlineData: { mimeType: 'application/pdf', data: fileBase64 } },
-                        { text: basePrompt + "\n\nEXTRACT EVERY SINGLE ROW FROM ALL PAGES." }
-                    ]
-                },
-                config: { temperature: 0.0, maxOutputTokens: 65000, safetySettings }
-            }));
-            if (response.text) extractedText = response.text;
+            // === PDF CHUNKING STRATEGY ===
+            console.log("Detecting PDF Pages...");
+            const pdfDoc = await PDFDocument.load(fileBase64);
+            const totalPages = pdfDoc.getPageCount();
+            console.log(`PDF has ${totalPages} pages.`);
+
+            const BATCH_SIZE = 4; // Process 4 pages at a time to ensure Gemini doesn't get lazy
+            
+            for (let i = 0; i < totalPages; i += BATCH_SIZE) {
+                const subDoc = await PDFDocument.create();
+                // Copy pages [i ... i+BATCH_SIZE]
+                const pageIndices = [];
+                for(let j = 0; j < BATCH_SIZE && (i + j) < totalPages; j++) {
+                    pageIndices.push(i + j);
+                }
+                
+                const copiedPages = await subDoc.copyPages(pdfDoc, pageIndices);
+                copiedPages.forEach(page => subDoc.addPage(page));
+                
+                const subPdfBase64 = await subDoc.saveAsBase64();
+                console.log(`Processing Batch ${i/BATCH_SIZE + 1} (Pages ${pageIndices.join(', ')})`);
+
+                const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+                    model: 'gemini-3-flash-preview',
+                    contents: { parts: [
+                        { inlineData: { mimeType: 'application/pdf', data: subPdfBase64 } },
+                        { text: basePrompt + `\n\nEXTRACTING BATCH ${i/BATCH_SIZE + 1} of ${Math.ceil(totalPages/BATCH_SIZE)}. EXTRACT EVERY SINGLE ROW.` }
+                    ]},
+                    config: { temperature: 0.0, maxOutputTokens: 8192, safetySettings }
+                }));
+
+                if (response.text) {
+                    extractedText += response.text + "\n";
+                }
+            }
 
         } else {
             // Excel/Image Fallback (No chunking for Images usually needed)
             const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                model: 'gemini-2.0-flash',
-                contents: {
-                    parts: [
-                        { inlineData: { mimeType: mimeType, data: fileBase64 } },
-                        { text: basePrompt + "\n\nEXTRACT EVERYTHING." }
-                    ]
-                },
+                model: 'gemini-3-flash-preview',
+                contents: { parts: [
+                    { inlineData: { mimeType: mimeType, data: fileBase64 } },
+                    { text: basePrompt + "\n\nEXTRACT EVERYTHING." }
+                ]},
                 config: { temperature: 0.1, maxOutputTokens: 65000, safetySettings }
             }));
             extractedText = response.text || "";
         }
 
         let lines = extractedText.split('\n').filter(l => l.trim().length > 0);
-
+        
         // Detect DocType from Text
         const docTypeLine = lines.find(l => /Balanço|Balancete|Demonstração|Resultado/i.test(l));
         if (docTypeLine) {
             if (/Resultado|DRE/i.test(docTypeLine)) docType = 'DRE';
             else if (/Balanço/i.test(docTypeLine)) docType = 'Balanço Patrimonial';
         }
-
+        
         // Remove known garbage lines
         lines = lines.filter(l => !l.startsWith('DOCTYPE') && /\d/.test(l));
-
+        
         return { lines, docType };
 
     } catch (e: any) {
@@ -518,7 +502,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
     }
 }
 
-async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, sampleAccounts: string[]): Promise<{ observations: string[], spellcheck: any[], period: string }> {
+async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, sampleAccounts: string[]): Promise<{observations: string[], spellcheck: any[], period: string}> {
     const prompt = `
     ATUE COMO: Auditor Contábil Senior SP Assessoria.
     DADOS: Doc: ${summaryData.document_type}, Resultado: ${summaryData.specific_result_value}.
@@ -537,7 +521,7 @@ async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, samp
     `;
     try {
         const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-            model: 'gemini-2.0-flash',
+            model: 'gemini-3-flash-preview',
             contents: { parts: [{ text: prompt }] },
             config: { responseMimeType: "application/json", temperature: 0.4 }
         }));
@@ -551,67 +535,67 @@ async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, samp
 }
 
 export const analyzeDocument = async (fileBase64: string, mimeType: string): Promise<AnalysisResult> => {
-    if (!import.meta.env.VITE_API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
-    const { lines, docType } = await extractRawData(ai, fileBase64, mimeType);
+  if (!process.env.API_KEY) throw new Error("API Key not found.");
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const { lines, docType } = await extractRawData(ai, fileBase64, mimeType);
+  
+  // Debug Log to see what Gemini is actually returning in Console
+  console.log("Raw Extracted Lines Preview:", lines.slice(0, 10));
 
-    // Debug Log to see what Gemini is actually returning in Console
-    console.log("Raw Extracted Lines Preview:", lines.slice(0, 10));
-
-    if (lines.length === 0) throw new Error("Nenhum dado contábil identificado.");
-    const result = normalizeFinancialData(lines, docType);
-
-    if (result.accounts.length === 0) throw new Error("Falha na interpretação das linhas. Tente outro formato.");
-
-    const sample = result.accounts.slice(0, 150).map(a => a.account_name);
-    const narrative = await generateNarrativeAnalysis(ai, result.summary, sample);
-    result.summary.period = narrative.period || 'Período não identificado';
-    result.summary.observations = narrative.observations || [];
-    result.spell_check = narrative.spellcheck || [];
-    return result;
+  if (lines.length === 0) throw new Error("Nenhum dado contábil identificado.");
+  const result = normalizeFinancialData(lines, docType);
+  
+  if (result.accounts.length === 0) throw new Error("Falha na interpretação das linhas. Tente outro formato.");
+  
+  const sample = result.accounts.slice(0, 150).map(a => a.account_name);
+  const narrative = await generateNarrativeAnalysis(ai, result.summary, sample);
+  result.summary.period = narrative.period || 'Período não identificado';
+  result.summary.observations = narrative.observations || [];
+  result.spell_check = narrative.spellcheck || [];
+  return result;
 };
 
 export const generateFinancialInsight = async (analysisData: AnalysisResult, userPrompt: string, multiple: number): Promise<string> => {
-    if (!import.meta.env.VITE_API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
-    const topAccounts = (analysisData.accounts || []).filter(a => !a.is_synthetic).sort((a, b) => b.total_value - a.total_value).slice(0, 150).map(a => `${a.account_name}: ${a.final_balance}`).join('\n');
-    const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-        model: 'gemini-1.5-pro',
-        contents: { parts: [{ text: `DADOS:\n${topAccounts}\n\nPEDIDO:\n${userPrompt}` }] },
-        config: { systemInstruction: `Especialista SP Assessoria. Analise a saúde financeira.`, temperature: 0.4 }
-    }));
-    return response.text || "Sem resposta.";
+  if (!process.env.API_KEY) throw new Error("API Key not found.");
+  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const topAccounts = (analysisData.accounts || []).filter(a => !a.is_synthetic).sort((a, b) => b.total_value - a.total_value).slice(0, 150).map(a => `${a.account_name}: ${a.final_balance}`).join('\n');
+  const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+    model: 'gemini-3-pro-preview',
+    contents: { parts: [{ text: `DADOS:\n${topAccounts}\n\nPEDIDO:\n${userPrompt}` }] },
+    config: { systemInstruction: `Especialista SP Assessoria. Analise a saúde financeira.`, temperature: 0.4 }
+  }));
+  return response.text || "Sem resposta.";
 };
 
 export const generateCMVAnalysis = async (analysisData: AnalysisResult, accountingStandard: string): Promise<string> => {
-    if (!import.meta.env.VITE_API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
+    if (!process.env.API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const accounts = (analysisData.accounts || []).slice(0, 300).map(a => `${a.account_code} ${a.account_name}: ${a.total_value}`).join('\n');
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-        model: 'gemini-1.5-pro',
-        contents: { parts: [{ text: `Analise CMV:\n${accounts}` }] },
-        config: { systemInstruction: `Auditor de Custos SP Assessoria.`, temperature: 0.3 }
+      model: 'gemini-3-pro-preview',
+      contents: { parts: [{ text: `Analise CMV:\n${accounts}` }] },
+      config: { systemInstruction: `Auditor de Custos SP Assessoria.`, temperature: 0.3 }
     }));
     return response.text || "Sem resposta.";
 };
 
 export const generateSpedComplianceCheck = async (analysisData: AnalysisResult): Promise<string> => {
-    if (!import.meta.env.VITE_API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
+    if (!process.env.API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const accounts = (analysisData.accounts || []).slice(0, 250).map(a => `${a.account_code || '?'} | ${a.account_name} | ${a.final_balance}`).join('\n');
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-        model: 'gemini-1.5-pro',
+        model: 'gemini-3-pro-preview',
         contents: { parts: [{ text: `Auditoria SPED:\n\n${accounts}` }] },
         config: { systemInstruction: "Especialista em SPED ECD/ECF SP Assessoria.", temperature: 0.2 }
     }));
     return response.text || "Análise não gerada.";
 };
 
-export const chatWithFinancialAgent = async (history: { role: 'user' | 'model', parts: { text: string }[] }[], message: string) => {
-    if (!import.meta.env.VITE_API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
+export const chatWithFinancialAgent = async (history: {role: 'user' | 'model', parts: {text: string}[]}[], message: string) => {
+    if (!process.env.API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const chat: Chat = ai.chats.create({
-        model: 'gemini-1.5-pro',
+        model: 'gemini-3-pro-preview',
         history: history,
         config: { systemInstruction: "Assistente contábil sênior SP Assessoria.", tools: [{ googleSearch: {} }] }
     });
@@ -620,9 +604,9 @@ export const chatWithFinancialAgent = async (history: { role: 'user' | 'model', 
 }
 
 export const generateComparisonAnalysis = async (rows: ComparisonRow[], period1: string, period2: string): Promise<string> => {
-    if (!import.meta.env.VITE_API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
-
+    if (!process.env.API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    
     const topVariations = rows
         .filter(r => !r.is_synthetic)
         .sort((a, b) => Math.abs(b.varAbs) - Math.abs(a.varAbs))
@@ -631,11 +615,11 @@ export const generateComparisonAnalysis = async (rows: ComparisonRow[], period1:
         .join('\n');
 
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-        model: 'gemini-1.5-pro',
+        model: 'gemini-3-pro-preview',
         contents: { parts: [{ text: `Analise as variações financeiras entre os períodos ${period1} e ${period2}. Foque nas contas com maiores variações absolutas e percentuais:\n\n${topVariations}` }] },
-        config: {
-            systemInstruction: "Você é um Auditor Contábil Senior da SP Assessoria especializado em análise horizontal. Forneça insights detalhados sobre os motivos prováveis das variações e destaque riscos ou anomalias.",
-            temperature: 0.3
+        config: { 
+            systemInstruction: "Você é um Auditor Contábil Senior da SP Assessoria especializado em análise horizontal. Forneça insights detalhados sobre os motivos prováveis das variações e destaque riscos ou anomalias.", 
+            temperature: 0.3 
         }
     }));
     return response.text || "Análise não gerada.";
