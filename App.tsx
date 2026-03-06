@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useMemo } from 'react';
 import HeaderInputs from './components/HeaderInputs';
 import FileUploader from './components/FileUploader';
