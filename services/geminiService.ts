@@ -4,7 +4,7 @@ import { AnalysisResult, ExtractedAccount, ComparisonRow } from "../types";
 // ============================================================================
 // ⚠️ PAULO: COLOQUE SUA CHAVE DO GOOGLE ENTRE AS ASPAS ABAIXO (UMA SÓ VEZ) ⚠️
 // ============================================================================
-const MINHA_CHAVE_GEMINI = "AIzaSyC2GL-BPbkMuCKNAFEHDaKgRvZkKYUjKAY";
+const MINHA_CHAVE_GEMINI = "AIzaSyAJIk05Vr5FW5q1h7CxSHLpigK3X3rozlY";
 // ============================================================================
 
 // Helper for Exponential Backoff
