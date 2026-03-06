@@ -1,14 +1,12 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { AnalysisResult, ExtractedAccount, ComparisonRow } from "../types";
 
-// COLOQUE A SUA CHAVE DENTRO DAS ASPAS ABAIXO
+// COLOQUE A CHAVE DIRETAMENTE AQUI PARA TESTE REAL
 const API_KEY = "AIzaSyC2GL-BPbkMuCKNAFEHDaKgRvZkKYUjKAY";
 const genAI = new GoogleGenerativeAI(API_KEY);
 
-export const analyzeDocument = async (fileBase64: string, mimeType: string) => {
-  // O código continua abaixo...
-        
-        // Remove o cabeçalho base64 se existir
-        const base64Data = fileBase64.includes(",") ? fileBase64.split(",")[1] : fileBase64;
+// A partir daqui, remova a linha "const apiKey = import.meta.env..." de dentro das funções
+// e use diretamente o "genAI" que definimos aqui no topo.        const base64Data = fileBase64.includes(",") ? fileBase64.split(",")[1] : fileBase64;
 
         const result = await model.generateContent([
             {
