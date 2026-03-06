@@ -1,16 +1,23 @@
 
-import React, { useState, useEffect, useMemo } from 'react';
-import HeaderInputs from './components/HeaderInputs';
-import FileUploader, { UploadedFile } from './components/FileUploader';
-import AnalysisViewer from './components/AnalysisViewer';
-import AnalysisHistory from './components/AnalysisHistory';
-import ChatAssistant from './components/ChatAssistant';
-import ComparisonViewer from './components/ComparisonViewer';
-import ConsolidationViewer from './components/ConsolidationViewer';
-import { HeaderData, AnalysisResult, HistoryItem, ComparisonResult, ComparisonRow, ConsolidationResult } from './types';
-import { analyzeDocument } from './services/geminiService';
-import { consolidateDREs } from './services/consolidationService';
+import * as pdfjsLib from 'pdfjs-dist';
 
+// Isso permite que o navegador leia o PDF sem travar
+pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+
+async function lerPdfContabil(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let textoFinal = "";
+
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    // Organiza o texto para não misturar colunas de valores
+    const strings = content.items.map(item => item.str);
+    textoFinal += strings.join(" ") + "\n";
+  }
+  return textoFinal;
+}
 const HISTORY_STORAGE_KEY = 'auditAI_history';
 const CACHE_STORAGE_PREFIX = 'auditAI_cache_';
 const THEME_STORAGE_KEY = 'auditAI_theme';
