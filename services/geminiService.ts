@@ -254,7 +254,7 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
             if (foundNumbers.length > 0) {
                 valuesPart = foundNumbers;
                 const nameTokens = tokens.slice(0, lastTokenIndex + 1);
-                if (nameTokens.length > 0) {
+                { inlineData: { mimeType: 'application/pdf', data: fileBase64 } }
                     if (/^[\d.-]+$/.test(nameTokens[0])) {
                         code = nameTokens[0];
                         name = nameTokens.slice(1).join(' ');
