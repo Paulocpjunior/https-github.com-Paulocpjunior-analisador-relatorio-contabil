@@ -1,6 +1,26 @@
 
 import * as pdfjsLib from 'pdfjs-dist';
 
+// Define o motor de busca de texto do PDF
+pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
+
+const handleFileUpload = async (file) => {
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let text = "";
+
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i);
+    const content = await page.getTextContent();
+    // Extrai o texto mantendo a ordem das linhas contábeis
+    const strings = content.items.map((item: any) => item.str);
+    text += strings.join(" ") + "\n";
+  }
+  
+  // Agora você passa esse 'text' para o Gemini analisar
+  console.log("Texto extraído:", text);
+};
+
 // Isso permite que o navegador leia o PDF sem travar
 pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 
