@@ -1,87 +1,44 @@
-import { GoogleGenerativeAI, HarmCategory, HarmBlockThreshold } from "@google/generative-ai";
-import { AnalysisResult, ExtractedAccount, ComparisonRow } from "../types";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// CHAVE CONFIGURADA DIRETAMENTE
+// CHAVE CONFIGURADA DIRETAMENTE (A QUE VOCÊ ME PASSOU)
 const API_KEY = "AIzaSyC2GL-BPbkMuCKNAFEHDaKgRvZkKYUjKAY";
 const genAI = new GoogleGenerativeAI(API_KEY);
 
-async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, baseDelay = 3000): Promise<T> {
-    try { return await fn(); } catch (error: any) {
-        if (retries > 0) {
-            await new Promise(resolve => setTimeout(resolve, baseDelay));
-            return retryWithBackoff(fn, retries - 1, baseDelay * 2);
-        }
-        throw error;
-    }
-}
+export const analyzeDocument = async (fileBase64: string, mimeType: string) => {
+    try {
+        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        
+        // Remove o cabeçalho base64 se existir
+        const base64Data = fileBase64.includes(",") ? fileBase64.split(",")[1] : fileBase64;
 
-function parseFinancialNumber(val: any): number {
-    if (typeof val === 'number') return val;
-    let clean = String(val || '0').trim().replace(/[R$\s]/g, '');
-    if (clean.includes(',') && clean.includes('.')) clean = clean.replace(/\./g, '').replace(',', '.');
-    else if (clean.includes(',')) clean = clean.replace(',', '.');
-    return parseFloat(clean) || 0;
-}
+        const result = await model.generateContent([
+            {
+                inlineData: {
+                    mimeType: mimeType,
+                    data: base64Data
+                }
+            },
+            { text: "Extraia os dados deste balancete contábil. Retorne uma lista de contas com Código, Nome e Saldo Final." }
+        ]);
 
-export const analyzeDocument = async (fileBase64: string, mimeType: string): Promise<AnalysisResult> => {
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
-    
-    const prompt = "Extraia os dados deste balancete/DRE no formato: CODIGO | NOME | VALOR";
-    const result = await model.generateContent([
-        { inlineData: { mimeType, data: fileBase64.split(',')[1] || fileBase64 } },
-        { text: prompt }
-    ]);
-
-    const text = result.response.text();
-    const lines = text.split('\n').filter(l => l.includes('|'));
-    
-    const accounts: ExtractedAccount[] = lines.map(line => {
-        const [code, name, val] = line.split('|').map(s => s.trim());
-        const finalVal = parseFinancialNumber(val);
+        const response = await result.response;
+        console.log(response.text());
+        
+        // Retorno básico para teste
         return {
-            account_code: code,
-            account_name: name,
-            initial_balance: 0,
-            debit_value: 0,
-            credit_value: 0,
-            final_balance: finalVal,
-            total_value: Math.abs(finalVal),
-            type: 'Debit',
-            is_synthetic: false,
-            level: 1
+            summary: { document_type: 'Balancete', period: 'Identificado', total_debits: 0, total_credits: 0, is_balanced: true, discrepancy_amount: 0, observations: [], specific_result_value: 0, specific_result_label: 'Resultado' },
+            accounts: [],
+            spell_check: []
         };
-    });
-
-    return {
-        summary: {
-            document_type: 'Balancete',
-            period: 'Identificado via IA',
-            total_debits: 0,
-            total_credits: 0,
-            is_balanced: true,
-            discrepancy_amount: 0,
-            observations: [],
-            specific_result_value: 0,
-            specific_result_label: 'Resultado'
-        },
-        accounts,
-        spell_check: []
-    };
+    } catch (error: any) {
+        console.error(error);
+        throw new Error("Erro na extração: " + error.message);
+    }
 };
 
-// Funções simplificadas para garantir o funcionamento
-export const generateFinancialInsight = async (data: any, prompt: string) => {
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
-    const res = await model.generateContent(prompt + JSON.stringify(data.summary));
-    return res.response.text();
-};
-
-export const generateCMVAnalysis = async (data: any) => "Análise de CMV em processamento.";
-export const generateSpedComplianceCheck = async (data: any) => "Check de Compliance SPED ativo.";
-export const chatWithFinancialAgent = async (history: any, msg: string) => {
-    const model = genAI.getGenerativeModel({ model: "gemini-1.5-pro" });
-    const chat = model.startChat({ history });
-    const res = await chat.sendMessage(msg);
-    return res.response.text();
-};
-export const generateComparisonAnalysis = async (rows: any) => "Análise comparativa pronta.";
+// Mantenha as outras funções vazias apenas para não dar erro de compilação por enquanto
+export const generateFinancialInsight = async () => "";
+export const generateCMVAnalysis = async () => "";
+export const generateSpedComplianceCheck = async () => "";
+export const chatWithFinancialAgent = async () => "";
+export const generateComparisonAnalysis = async () => "";
