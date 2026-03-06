@@ -1,12 +1,11 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// CHAVE CONFIGURADA DIRETAMENTE (A QUE VOCÊ ME PASSOU)
+// COLOQUE A SUA CHAVE DENTRO DAS ASPAS ABAIXO
 const API_KEY = "AIzaSyC2GL-BPbkMuCKNAFEHDaKgRvZkKYUjKAY";
 const genAI = new GoogleGenerativeAI(API_KEY);
 
 export const analyzeDocument = async (fileBase64: string, mimeType: string) => {
-    try {
-        const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+  // O código continua abaixo...
         
         // Remove o cabeçalho base64 se existir
         const base64Data = fileBase64.includes(",") ? fileBase64.split(",")[1] : fileBase64;
