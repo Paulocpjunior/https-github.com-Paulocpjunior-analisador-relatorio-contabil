@@ -25,14 +25,9 @@
     "typescript": "~5.8.2",
     "vite": "^6.2.0"
   }
-}"dependencies": {
-  "pdf-parse": "^1.1.1",
-  "canvas": "^2.11.2",
-  "@google/generative-ai": "^0.1.0"
-}
 "dependencies": {
     "@google/generative-ai": "^0.1.0",
-    "pdfjs-dist": "^4.0.379",
+    "pdfjs-dist": "4.0.379",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "recharts": "2.13.0",
@@ -40,4 +35,4 @@
     "xlsx": "latest",
     "jspdf": "2.5.1",
     "jspdf-autotable": "3.8.2"
-  },
+  }
