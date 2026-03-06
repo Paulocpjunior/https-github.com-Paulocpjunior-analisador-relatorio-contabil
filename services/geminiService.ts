@@ -551,8 +551,8 @@ async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, samp
 }
 
 export const analyzeDocument = async (fileBase64: string, mimeType: string): Promise<AnalysisResult> => {
-    if (!process.env.API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    if (!import.meta.env.VITE_API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
     const { lines, docType } = await extractRawData(ai, fileBase64, mimeType);
 
     // Debug Log to see what Gemini is actually returning in Console
@@ -572,8 +572,8 @@ export const analyzeDocument = async (fileBase64: string, mimeType: string): Pro
 };
 
 export const generateFinancialInsight = async (analysisData: AnalysisResult, userPrompt: string, multiple: number): Promise<string> => {
-    if (!process.env.API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    if (!import.meta.env.VITE_API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
     const topAccounts = (analysisData.accounts || []).filter(a => !a.is_synthetic).sort((a, b) => b.total_value - a.total_value).slice(0, 150).map(a => `${a.account_name}: ${a.final_balance}`).join('\n');
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
         model: 'gemini-1.5-pro',
@@ -584,8 +584,8 @@ export const generateFinancialInsight = async (analysisData: AnalysisResult, use
 };
 
 export const generateCMVAnalysis = async (analysisData: AnalysisResult, accountingStandard: string): Promise<string> => {
-    if (!process.env.API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    if (!import.meta.env.VITE_API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
     const accounts = (analysisData.accounts || []).slice(0, 300).map(a => `${a.account_code} ${a.account_name}: ${a.total_value}`).join('\n');
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
         model: 'gemini-1.5-pro',
@@ -596,8 +596,8 @@ export const generateCMVAnalysis = async (analysisData: AnalysisResult, accounti
 };
 
 export const generateSpedComplianceCheck = async (analysisData: AnalysisResult): Promise<string> => {
-    if (!process.env.API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    if (!import.meta.env.VITE_API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
     const accounts = (analysisData.accounts || []).slice(0, 250).map(a => `${a.account_code || '?'} | ${a.account_name} | ${a.final_balance}`).join('\n');
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
         model: 'gemini-1.5-pro',
@@ -608,8 +608,8 @@ export const generateSpedComplianceCheck = async (analysisData: AnalysisResult):
 };
 
 export const chatWithFinancialAgent = async (history: { role: 'user' | 'model', parts: { text: string }[] }[], message: string) => {
-    if (!process.env.API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    if (!import.meta.env.VITE_API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
     const chat: Chat = ai.chats.create({
         model: 'gemini-1.5-pro',
         history: history,
@@ -620,8 +620,8 @@ export const chatWithFinancialAgent = async (history: { role: 'user' | 'model', 
 }
 
 export const generateComparisonAnalysis = async (rows: ComparisonRow[], period1: string, period2: string): Promise<string> => {
-    if (!process.env.API_KEY) throw new Error("API Key not found.");
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    if (!import.meta.env.VITE_API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: import.meta.env.VITE_API_KEY });
 
     const topVariations = rows
         .filter(r => !r.is_synthetic)
