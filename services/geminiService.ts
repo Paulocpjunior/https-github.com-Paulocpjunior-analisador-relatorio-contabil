@@ -1,4 +1,3 @@
-
 import { GoogleGenAI, GenerateContentResponse, HarmCategory, HarmBlockThreshold, Chat } from "@google/genai";
 import { AnalysisResult, ExtractedAccount, ComparisonRow } from "../types";
 
@@ -64,42 +63,28 @@ function parseFinancialNumber(val: any): number {
     if (!val) return 0;
 
     let clean = String(val).trim();
-
-    // Quick return for empty or non-numeric looking strings
     if (!clean || clean === '-' || clean === '–') return 0;
 
-    // Remove currency symbols and common noise
     clean = clean.replace(/^R\$\s?/, '').replace(/\s/g, '');
+    clean = clean.replace(/O/gi, '0').replace(/l/g, '1').replace(/[^0-9.,\-()]/g, '');
 
-    // Fix common OCR errors
-    clean = clean.replace(/O/gi, '0')
-        .replace(/l/g, '1')
-        .replace(/[^0-9.,\-()]/g, '');
-
-    // Handle Parentheses as Negative
     const isNegativeParens = /^\(.*\)$/.test(clean);
     if (isNegativeParens) {
         clean = clean.replace(/[()]/g, '');
     }
 
-    // IMPORTANT: Brazilian Format Detection (1.000,00) vs US (1,000.00)
     const lastDotIndex = clean.lastIndexOf('.');
     const lastCommaIndex = clean.lastIndexOf(',');
 
     if (lastCommaIndex > lastDotIndex) {
-        // Brazilian format: remove dots, replace comma with dot
         clean = clean.replace(/\./g, '').replace(',', '.');
     } else if (lastDotIndex > lastCommaIndex) {
-        // US format: remove commas
         clean = clean.replace(/,/g, '');
     } else {
-        // No separator or only one type. 
-        // If it has a comma, treat as decimal separator (common in BR)
         if (clean.includes(',')) clean = clean.replace(',', '.');
     }
 
     let num = parseFloat(clean);
-
     if (isNaN(num)) return 0;
     if (isNegativeParens) num = -Math.abs(num);
 
@@ -114,19 +99,9 @@ function checkInversion(name: string, type: 'Debit' | 'Credit', finalBalance: nu
     else if (code.startsWith('3') || lowerName.includes('receita') || lowerName.includes('faturamento') || lowerName.includes('venda')) expectedNature = 'Credit';
     else if (code.startsWith('4') || lowerName.includes('despesa') || lowerName.includes('custo') || lowerName.includes('gastos')) expectedNature = 'Debit';
 
-    const deductionKeywords = [
-        'devolu', 'cancelamento', 'abatimento', 'imposto sobre', 'tributo sobre', 'cmv', 'cpv', 'csv'
-    ];
+    const deductionKeywords = ['devolu', 'cancelamento', 'abatimento', 'imposto sobre', 'tributo sobre', 'cmv', 'cpv', 'csv'];
     if (deductionKeywords.some(k => lowerName.includes(k))) {
         expectedNature = 'Debit';
-    }
-
-    let actualNature: 'Debit' | 'Credit' = type;
-    if (indicator) {
-        if (indicator.toUpperCase() === 'D') actualNature = 'Debit';
-        if (indicator.toUpperCase() === 'C') actualNature = 'Credit';
-    } else {
-        if (finalBalance < 0) actualNature = 'Credit';
     }
 
     if (expectedNature !== 'Unknown') return false;
@@ -137,21 +112,11 @@ function mapValuesToColumns(numbers: number[], docType: string): { initial: numb
     const count = numbers.length;
     let initial = 0, debit = 0, credit = 0, final = 0;
 
-    // --- DRE SPECIFIC LOGIC ---
     if (docType === 'DRE') {
-        if (count > 0) {
-            // For DRE, usually the last valid number is the accumulated or relevant period result in single-column extractions.
-            // However, our prompt asks to prioritize current period.
-            // Let's take the LAST number found if multiple exist, assuming column order [Period 1] [Period 2] ...
-            // Or if pipe extraction is clean, index 0 is what we want.
-            // Safe bet: The number with the highest absolute value is likely the Total.
-            // Actually, strict index 0 is safer if the prompt is obeyed.
-            final = numbers[0];
-        }
+        if (count > 0) final = numbers[0];
         return { initial, debit, credit, final };
     }
 
-    // --- STANDARD BALANCETE LOGIC ---
     if (count === 1) {
         final = numbers[0];
     } else if (count === 2) {
@@ -177,36 +142,26 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
     rawLines.forEach(line => {
         let cleanLine = line.trim();
         if (!cleanLine || cleanLine.length < 5) return;
-
-        // Filter out likely headers
         if (/^(doctype|data|conta|descri|saldo|débito|crédito|página|page|cod|cód|movimento|transporte|historico|empresa|cnpj)/i.test(cleanLine)) return;
-        // Filter markdown table separators
         if (/^\|?[\s-]+\|?$/.test(cleanLine)) return;
 
         let code = '';
         let name = '';
         let valuesPart: number[] = [];
-        let type: 'Debit' | 'Credit' = 'Debit'; // Default
+        let type: 'Debit' | 'Credit' = 'Debit';
 
-        // --- STRATEGY 1: PIPE SEPARATOR (Preferred) ---
         if (cleanLine.includes('|')) {
-            // Robust split: trim and remove empty parts (common in markdown "| val |" -> ["", "val", ""])
             const parts = cleanLine.split('|').map(p => p.trim()).filter(p => p.length > 0);
-
             if (parts.length >= 2) {
                 const firstLooksLikeCode = /^[\d.-]+$/.test(parts[0]) && parts[0].length < 20;
-
                 if (firstLooksLikeCode) {
                     code = parts[0];
                     name = parts[1];
                     for (let i = 2; i < parts.length; i++) {
-                        // Filter out known non-value columns like "D", "C", "%"
                         if (/^[DC%]$/i.test(parts[i])) continue;
-                        const val = parseFinancialNumber(parts[i]);
-                        valuesPart.push(val);
+                        valuesPart.push(parseFinancialNumber(parts[i]));
                     }
                 } else {
-                    // No Code, just Name | Value
                     name = parts[0];
                     for (let i = 1; i < parts.length; i++) {
                         if (/^[DC%]$/i.test(parts[i])) continue;
@@ -216,11 +171,8 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
             }
         }
 
-        // --- STRATEGY 2: REVERSE PARSING (Fallback) ---
         if (valuesPart.length === 0) {
-            // Clean common separator noise
-            cleanLine = cleanLine.replace(/\.{3,}/g, ' '); // Replace .... with space
-
+            cleanLine = cleanLine.replace(/\.{3,}/g, ' ');
             const tokens = cleanLine.split(/\s+/);
             const foundNumbers: number[] = [];
             let lastTokenIndex = tokens.length - 1;
@@ -228,33 +180,24 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
 
             while (lastTokenIndex >= 0 && numbersFoundCount < 4) {
                 const token = tokens[lastTokenIndex];
-
-                // Skip indicators
                 if (/^[DC%]$/i.test(token)) {
                     lastTokenIndex--;
                     continue;
                 }
-
-                // Check if it looks strictly like a financial number
                 if (/^[\d.,\-()]+$/.test(token) && /\d/.test(token)) {
-                    const val = parseFinancialNumber(token);
-                    foundNumbers.unshift(val);
+                    foundNumbers.unshift(parseFinancialNumber(token));
                     numbersFoundCount++;
                     lastTokenIndex--;
                 } else {
-                    // If we hit a word, stop (unless it's R$)
-                    if (token.toUpperCase() === 'R$') {
-                        lastTokenIndex--;
-                    } else {
-                        break;
-                    }
+                    if (token.toUpperCase() === 'R$') lastTokenIndex--;
+                    else break;
                 }
             }
 
             if (foundNumbers.length > 0) {
                 valuesPart = foundNumbers;
                 const nameTokens = tokens.slice(0, lastTokenIndex + 1);
-                { inlineData: { mimeType: 'application/pdf', data: fileBase64 } }
+                if (nameTokens.length > 0) {
                     if (/^[\d.-]+$/.test(nameTokens[0])) {
                         code = nameTokens[0];
                         name = nameTokens.slice(1).join(' ');
@@ -265,13 +208,10 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
             }
         }
 
-        // Cleanup Name
         name = name.replace(/[.|]{2,}/g, '').trim();
         if (!name || name.length < 2 || valuesPart.length === 0) return;
 
-        // Determine Type (Debit/Credit) mainly for DRE logic
         const lowerName = name.toLowerCase();
-
         if (code.startsWith('2') || code.startsWith('3') || code.startsWith('6') ||
             lowerName.includes('passivo') || lowerName.includes('fornecedor') ||
             lowerName.includes('receita') || lowerName.includes('patrimônio') || lowerName.includes('capital') ||
@@ -311,8 +251,6 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
             }
         }
 
-        const possibleInversion = checkInversion(name, type, finalBal, null, cleanCode);
-
         accounts.push({
             account_code: cleanCode,
             account_name: name,
@@ -322,14 +260,13 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
             final_balance: finalBal,
             total_value: Math.abs(finalBal),
             type,
-            possible_inversion: possibleInversion,
+            possible_inversion: checkInversion(name, type, finalBal, null, cleanCode),
             ifrs18_category: category as any,
             level: 1,
             is_synthetic: false
         });
     });
 
-    // Post-processing hierarchy
     accounts.sort((a, b) => {
         if (!a.account_code) return 1;
         if (!b.account_code) return -1;
@@ -410,7 +347,6 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
     };
 }
 
-// --- NEW PDF CHUNKING LOGIC ---
 async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: string): Promise<{ lines: string[], docType: string }> {
     const safetySettings = [
         { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
@@ -420,70 +356,61 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
     ];
 
     const basePrompt = `
-    TASK: Financial Data Extraction.
-    OUTPUT FORMAT: "CODE | ACCOUNT NAME | VALUE"
+    TAREFA: Extração de Dados Financeiros.
+    FORMATO DE SAÍDA: "CÓDIGO | NOME DA CONTA | VALOR"
     
-    CRITICAL RULES:
-    1. EXTRACT LINE BY LINE FROM ALL PROVIDED IMAGES/PAGES.
-    2. FORCE PIPE SEPARATOR (|) between Code, Name, and Value.
-    3. IGNORE NON-MONETARY COLUMNS (e.g., %, AV, AH, Indicators D/C).
-    4. IF MULTIPLE VALUE COLUMNS (e.g., Period 1 | Period 2): EXTRACT ONLY CURRENT PERIOD.
-    5. KEEP ORIGINAL NUMBER FORMAT (e.g. 1.000,00).
-    6. NO MARKDOWN TABLES, JUST RAW TEXT LINES.
-    7. IGNORE HEADERS/FOOTERS. DO NOT SUMMARIZE.
-    
-    Example:
-    3.01 | Receita Vendas | 100.000,00
-    3.02 | (-) Devoluções | (10.000,00)
-    | Total Receita | 90.000,00
+    REGRAS CRÍTICAS:
+    1. EXTRAIA LINHA POR LINHA DE TODAS AS PÁGINAS.
+    2. FORCE O SEPARADOR PIPE (|) entre Código, Nome e Valor.
+    3. IGNORE COLUNAS NÃO MONETÁRIAS (ex: %, AV, AH, Indicadores D/C).
+    4. SE HOUVER VÁRIAS COLUNAS DE VALORES: EXTRAIA APENAS O PERÍODO ATUAL.
+    5. MANTENHA O FORMATO NUMÉRICO ORIGINAL (ex: 1.000,00).
+    6. APENAS LINHAS DE TEXTO BRUTO, SEM TABELAS MARKDOWN.
     `;
 
     try {
         let extractedText = "";
         let docType = 'Balancete';
 
+        // Com o novo FileUploader, os PDFs chegarão aqui como 'text/plain' já estruturados
         if (mimeType === 'text/csv' || mimeType === 'text/plain' || mimeType === 'application/csv') {
-            // ... (CSV logic remains the same) ...
             const decodedText = safeDecodeBase64(fileBase64);
             const allLines = decodedText.split('\n');
-            const CHUNK_SIZE = 600;
+            const CHUNK_SIZE = 400; // Reduzido para evitar timeout no Cloud Run
             const chunks: string[] = [];
             for (let i = 0; i < allLines.length; i += CHUNK_SIZE) chunks.push(allLines.slice(i, i + CHUNK_SIZE).join('\n'));
 
             for (let i = 0; i < chunks.length; i++) {
                 const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
                     model: 'gemini-2.0-flash',
-                    contents: { parts: [{ text: basePrompt + `\n\n--- SEGMENT ${i + 1} OF ${chunks.length} ---\n${chunks[i]}\n--- END SEGMENT ---` }] },
+                    contents: { parts: [{ text: basePrompt + `\n\n--- SEGMENTO ${i + 1} DE ${chunks.length} ---\n${chunks[i]}\n--- FIM SEGMENTO ---` }] },
                     config: { temperature: 0.0, maxOutputTokens: 8192, safetySettings }
                 }));
                 if (response.text) extractedText += response.text + "\n";
             }
         }
         else if (mimeType === 'application/pdf') {
-            // === DIRECT GEMINI PDF PROCESSING ===
-            // Gemini's vision model natively handles multi-page PDFs.
-            // This approach is more robust than pdf-lib chunking.
-            console.log("Sending PDF directly to Gemini for extraction...");
+            // Fallback caso o frontend envie o PDF bruto
+            console.log("Enviando PDF diretamente para o Gemini (Fallback)...");
             const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
                 model: 'gemini-2.0-flash',
                 contents: {
                     parts: [
                         { inlineData: { mimeType: 'application/pdf', data: fileBase64 } },
-                        { text: basePrompt + "\n\nEXTRACT EVERY SINGLE ROW FROM ALL PAGES." }
+                        { text: basePrompt + "\n\nIMPORTANTE: Respeite o alinhamento das colunas. Uma conta e seu valor devem ficar na mesma linha." }
                     ]
                 },
-                config: { temperature: 0.0, maxOutputTokens: 65000, safetySettings }
+                config: { temperature: 0.1, maxOutputTokens: 65000, safetySettings } // Temperatura levemente maior para evitar loops de alucinação em tabelas
             }));
             if (response.text) extractedText = response.text;
 
         } else {
-            // Excel/Image Fallback (No chunking for Images usually needed)
             const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
                 model: 'gemini-2.0-flash',
                 contents: {
                     parts: [
                         { inlineData: { mimeType: mimeType, data: fileBase64 } },
-                        { text: basePrompt + "\n\nEXTRACT EVERYTHING." }
+                        { text: basePrompt + "\n\nEXTRAIA TUDO." }
                     ]
                 },
                 config: { temperature: 0.1, maxOutputTokens: 65000, safetySettings }
@@ -493,14 +420,12 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
 
         let lines = extractedText.split('\n').filter(l => l.trim().length > 0);
 
-        // Detect DocType from Text
         const docTypeLine = lines.find(l => /Balanço|Balancete|Demonstração|Resultado/i.test(l));
         if (docTypeLine) {
             if (/Resultado|DRE/i.test(docTypeLine)) docType = 'DRE';
             else if (/Balanço/i.test(docTypeLine)) docType = 'Balanço Patrimonial';
         }
 
-        // Remove known garbage lines
         lines = lines.filter(l => !l.startsWith('DOCTYPE') && /\d/.test(l));
 
         return { lines, docType };
@@ -518,8 +443,8 @@ async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, samp
     AMOSTRA CONTAS: ${sampleAccounts.join('; ')}
     
     TAREFA: 
-    1. Identifique o período (ex: 01/2025).
-    2. Identifique erros ortográficos técnicos nas contas da amostra (ex: "Despessa" -> "Despesa").
+    1. Identifique o período.
+    2. Identifique erros ortográficos técnicos nas contas.
     
     SAÍDA JSON:
     {
@@ -532,7 +457,7 @@ async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, samp
         const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
             model: 'gemini-2.0-flash',
             contents: { parts: [{ text: prompt }] },
-            config: { responseMimeType: "application/json", temperature: 0.4 }
+            config: { responseMimeType: "application/json", temperature: 0.2 }
         }));
         const parsed = JSON.parse(response.text || '{}');
         return {
@@ -548,8 +473,7 @@ export const analyzeDocument = async (fileBase64: string, mimeType: string): Pro
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const { lines, docType } = await extractRawData(ai, fileBase64, mimeType);
 
-    // Debug Log to see what Gemini is actually returning in Console
-    console.log("Raw Extracted Lines Preview:", lines.slice(0, 10));
+    console.log("Raw Extracted Lines Preview:", lines.slice(0, 5));
 
     if (lines.length === 0) throw new Error("Nenhum dado contábil identificado.");
     const result = normalizeFinancialData(lines, docType);
