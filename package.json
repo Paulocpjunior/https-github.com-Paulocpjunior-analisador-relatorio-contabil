@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "start": "serve -s dist -l $PORT"
   },
-  "dependencies": {
+  "dependencies": 
     "@google/generative-ai": "^0.21.0",
     "pdfjs-dist": "4.0.379",
     "jspdf": "2.5.1",
