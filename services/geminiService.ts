@@ -489,7 +489,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
 
             for (let i = 0; i < chunks.length; i++) {
                 const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                    model: 'gemini-1.5-flash-latest',
+                    model: 'gemini-1.5-flash',
                     contents: { parts: [{ text: basePrompt + `\n\n--- SEGMENT ${i + 1} OF ${chunks.length} ---\n${chunks[i]}\n--- END SEGMENT ---` }] },
                     config: { temperature: 0.0, maxOutputTokens: 8192, safetySettings }
                 }));
@@ -503,7 +503,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
             console.log("Sending PDF directly to Gemini for extraction...");
             const sanitizedPdf = sanitizeBase64(fileBase64);
             const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                model: 'gemini-1.5-flash-latest',
+                model: 'gemini-1.5-flash',
                 contents: {
                     parts: [
                         { inlineData: { mimeType: 'application/pdf', data: sanitizedPdf } },
