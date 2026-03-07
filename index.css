@@ -1,0 +1,15 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --primary: #0f172a;
+  --secondary: #334155;
+  --accent: #2563eb;
+}
+
+.dark {
+  --primary: #f8fafc;
+  --secondary: #94a3b8;
+  --accent: #3b82f6;
+}

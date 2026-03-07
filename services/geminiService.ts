@@ -23,6 +23,30 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, baseDelay 
     }
 }
 
+/**
+ * Sanitizes a base64 string for safe use with Safari's atob() and Gemini SDK.
+ * Safari's atob() implementation is extremely strict and throws "The string did not match the expected pattern"
+ * if it encounters whitespace, newlines, or invalid characters.
+ */
+function sanitizeBase64(base64: string): string {
+    if (!base64) return "";
+
+    // 1. Remove data URL prefix if present (e.g., "data:application/pdf;base64,")
+    const raw = base64.includes(',') ? base64.split(',')[1] : base64;
+
+    // 2. Remove all whitespace, newlines, and characters NOT in the base64 alphabet
+    // Safari's atob() is extremely strict and throws "The string did not match the expected pattern"
+    // if it encounters ANY character outside the base64 set (A-Za-z0-9+/=).
+    // Note: We MUST keep '=' for padding if it's already there, but remove internal ones if they exist (unlikely but safe).
+    const cleaned = raw.replace(/[^A-Za-z0-9+/=]/g, '');
+
+    // 3. Ensure correct padding (length must be multiple of 4)
+    // Some libraries omit padding, but Safari's atob() often requires it.
+    const base64Content = cleaned.replace(/=/g, ''); // strip existing padding to recalculate
+    const paddingNeeded = (4 - (base64Content.length % 4)) % 4;
+    return base64Content + '='.repeat(paddingNeeded);
+}
+
 function customBase64ToUint8Array(base64: string): Uint8Array {
     const raw = base64.includes(',') ? base64.split(',')[1] : base64;
     const cleaned = raw.replace(/[^A-Za-z0-9+/]/g, '');
@@ -452,7 +476,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
 
             for (let i = 0; i < chunks.length; i++) {
                 const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                    model: 'gemini-2.0-flash',
+                    model: 'gemini-1.5-flash',
                     contents: { parts: [{ text: basePrompt + `\n\n--- SEGMENT ${i + 1} OF ${chunks.length} ---\n${chunks[i]}\n--- END SEGMENT ---` }] },
                     config: { temperature: 0.0, maxOutputTokens: 8192, safetySettings }
                 }));
@@ -464,11 +488,12 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
             // Gemini's vision model natively handles multi-page PDFs.
             // This approach is more robust than pdf-lib chunking.
             console.log("Sending PDF directly to Gemini for extraction...");
+            const sanitizedPdf = sanitizeBase64(fileBase64);
             const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                model: 'gemini-2.0-flash',
+                model: 'gemini-1.5-flash',
                 contents: {
                     parts: [
-                        { inlineData: { mimeType: 'application/pdf', data: fileBase64 } },
+                        { inlineData: { mimeType: 'application/pdf', data: sanitizedPdf } },
                         { text: basePrompt + "\n\nEXTRACT EVERY SINGLE ROW FROM ALL PAGES." }
                     ]
                 },
@@ -478,11 +503,12 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
 
         } else {
             // Excel/Image Fallback (No chunking for Images usually needed)
+            const sanitizedData = sanitizeBase64(fileBase64);
             const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                model: 'gemini-2.0-flash',
+                model: 'gemini-1.5-flash',
                 contents: {
                     parts: [
-                        { inlineData: { mimeType: mimeType, data: fileBase64 } },
+                        { inlineData: { mimeType: mimeType, data: sanitizedData } },
                         { text: basePrompt + "\n\nEXTRACT EVERYTHING." }
                     ]
                 },
@@ -530,7 +556,7 @@ async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, samp
     `;
     try {
         const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-            model: 'gemini-2.0-flash',
+            model: 'gemini-1.5-flash',
             contents: { parts: [{ text: prompt }] },
             config: { responseMimeType: "application/json", temperature: 0.4 }
         }));
@@ -546,7 +572,8 @@ async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, samp
 export const analyzeDocument = async (fileBase64: string, mimeType: string): Promise<AnalysisResult> => {
     if (!process.env.API_KEY) throw new Error("API Key not found.");
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const { lines, docType } = await extractRawData(ai, fileBase64, mimeType);
+    const sanitizedInput = sanitizeBase64(fileBase64);
+    const { lines, docType } = await extractRawData(ai, sanitizedInput, mimeType);
 
     // Debug Log to see what Gemini is actually returning in Console
     console.log("Raw Extracted Lines Preview:", lines.slice(0, 10));
