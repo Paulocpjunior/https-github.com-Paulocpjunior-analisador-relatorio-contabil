@@ -10,7 +10,14 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, baseDelay 
         const message = error?.message || '';
         const status = error?.status || error?.code;
 
-        if (message.includes('404') || message.includes('not found')) {
+        // Do NOT retry on client errors: invalid API key, bad request, not found, auth errors
+        const isClientError =
+            status === 400 || status === 401 || status === 403 || status === 404 ||
+            message.includes('400') || message.includes('401') || message.includes('403') ||
+            message.includes('404') || message.includes('not found') ||
+            message.includes('API_KEY_INVALID') || message.includes('API key not valid');
+
+        if (isClientError) {
             throw error;
         }
 

@@ -1,0 +1,19 @@
+steps:
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - 'auditai-analisador-cont-bil'
+      - '--source'
+      - '.'
+      - '--region'
+      - 'us-west1'
+      - '--platform'
+      - 'managed'
+      - '--allow-unauthenticated'
+      - '--set-env-vars'
+      - 'API_KEY=$_API_KEY,GEMINI_API_KEY=$_API_KEY'
+
+substitutions:
+  _API_KEY: ''
