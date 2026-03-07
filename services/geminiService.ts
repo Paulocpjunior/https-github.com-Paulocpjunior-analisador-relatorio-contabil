@@ -42,16 +42,22 @@ function sanitizeBase64(base64: string): string {
     const raw = base64.includes(',') ? base64.split(',')[1] : base64;
 
     // 2. Remove all whitespace, newlines, and characters NOT in the base64 alphabet
-    // Safari's atob() is extremely strict and throws "The string did not match the expected pattern"
-    // if it encounters ANY character outside the base64 set (A-Za-z0-9+/=).
-    // Note: We MUST keep '=' for padding if it's already there, but remove internal ones if they exist (unlikely but safe).
+    // Safari's atob() is extremely strict. It throws on ANY non-base64 character.
     const cleaned = raw.replace(/[^A-Za-z0-9+/=]/g, '');
 
     // 3. Ensure correct padding (length must be multiple of 4)
-    // Some libraries omit padding, but Safari's atob() often requires it.
-    const base64Content = cleaned.replace(/=/g, ''); // strip existing padding to recalculate
-    const paddingNeeded = (4 - (base64Content.length % 4)) % 4;
-    return base64Content + '='.repeat(paddingNeeded);
+    // Valid base64 strings can only have 0, 1, or 2 '=' signs.
+    // If length % 4 == 1, adding '===' is invalid. We fallback to 0 padding or truncation if needed.
+    const contentWithoutPadding = cleaned.replace(/=/g, '');
+    const remainder = contentWithoutPadding.length % 4;
+
+    if (remainder === 0) return contentWithoutPadding;
+    if (remainder === 2) return contentWithoutPadding + '==';
+    if (remainder === 3) return contentWithoutPadding + '=';
+
+    // remainder === 1 is invalid/corrupt data. Safari will fail anyway if we add ===.
+    // We return it as is or try to "fix" it by removing the dangling char.
+    return contentWithoutPadding.substring(0, contentWithoutPadding.length - 1);
 }
 
 function customBase64ToUint8Array(base64: string): Uint8Array {
@@ -483,7 +489,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
 
             for (let i = 0; i < chunks.length; i++) {
                 const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                    model: 'gemini-1.5-flash',
+                    model: 'gemini-1.5-flash-latest',
                     contents: { parts: [{ text: basePrompt + `\n\n--- SEGMENT ${i + 1} OF ${chunks.length} ---\n${chunks[i]}\n--- END SEGMENT ---` }] },
                     config: { temperature: 0.0, maxOutputTokens: 8192, safetySettings }
                 }));
@@ -497,7 +503,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
             console.log("Sending PDF directly to Gemini for extraction...");
             const sanitizedPdf = sanitizeBase64(fileBase64);
             const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                model: 'gemini-1.5-flash',
+                model: 'gemini-1.5-flash-latest',
                 contents: {
                     parts: [
                         { inlineData: { mimeType: 'application/pdf', data: sanitizedPdf } },
@@ -512,7 +518,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
             // Excel/Image Fallback (No chunking for Images usually needed)
             const sanitizedData = sanitizeBase64(fileBase64);
             const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-                model: 'gemini-1.5-flash',
+                model: 'gemini-1.5-flash-latest',
                 contents: {
                     parts: [
                         { inlineData: { mimeType: mimeType, data: sanitizedData } },
