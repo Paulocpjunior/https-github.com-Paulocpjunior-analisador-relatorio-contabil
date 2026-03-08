@@ -661,13 +661,38 @@ export const analyzeDocument = async (fileBase64: string, mimeType: string): Pro
 export const generateFinancialInsight = async (analysisData: AnalysisResult, userPrompt: string, multiple: number): Promise<string> => {
     if (!process.env.API_KEY) throw new Error("API Key not found.");
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-    const topAccounts = (analysisData.accounts || []).filter(a => !a.is_synthetic).sort((a, b) => b.total_value - a.total_value).slice(0, 150).map(a => `${a.account_name}: ${a.final_balance}`).join('\n');
+
+    // Pegar amostra maior e mais estruturada para a Saúde Financeira
+    const accounts = (analysisData.accounts || [])
+        .filter(a => !a.is_synthetic)
+        .sort((a, b) => Math.abs(b.final_balance) - Math.abs(a.final_balance))
+        .slice(0, 200)
+        .map(a => `${a.account_code || ''} ${a.account_name}: ${a.final_balance}`)
+        .join('\n');
+
+    const prompt = `
+    DADOS DO RELATÓRIO:
+    ${accounts}
+    
+    PEDIDO ESPECÍFICO:
+    ${userPrompt}
+    
+    INSTRUÇÕES DE AUDITORIA:
+    1. Analise a LIQUIDEZ, SOLVÊNCIA e ESTRUTURA DE CAPITAL.
+    2. Comente sobre o Resultado do Período (Lucro/Prejuízo) em relação ao faturamento.
+    3. Destaque pontos de atenção na Saúde Financeira (ex: excesso de endividamento, falta de capital de giro).
+    4. Seja técnico, direto e use o tom da SP Assessoria Contábil.
+    `;
+
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-        model: 'gemini-1.5-pro',
-        contents: { parts: [{ text: `DADOS:\n${topAccounts}\n\nPEDIDO:\n${userPrompt}` }] },
-        config: { systemInstruction: `Especialista SP Assessoria. Analise a saúde financeira.`, temperature: 0.4 }
+        model: 'gemini-2.0-flash',
+        contents: { parts: [{ text: prompt }] },
+        config: {
+            systemInstruction: "Você é o Diretor de Auditoria e Estratégia da SP Assessoria. Sua missão é fornecer um parecer técnico impecável sobre a Saúde Financeira da empresa com base nos dados fornecidos.",
+            temperature: 0.3
+        }
     }));
-    return response.text || "Sem resposta.";
+    return response.text || "Análise de saúde financeira não disponível no momento.";
 };
 
 export const generateCMVAnalysis = async (analysisData: AnalysisResult, accountingStandard: string): Promise<string> => {
@@ -675,7 +700,7 @@ export const generateCMVAnalysis = async (analysisData: AnalysisResult, accounti
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const accounts = (analysisData.accounts || []).slice(0, 300).map(a => `${a.account_code} ${a.account_name}: ${a.total_value}`).join('\n');
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-        model: 'gemini-1.5-pro',
+        model: 'gemini-2.0-flash',
         contents: { parts: [{ text: `Analise CMV:\n${accounts}` }] },
         config: { systemInstruction: `Auditor de Custos SP Assessoria.`, temperature: 0.3 }
     }));
@@ -687,7 +712,7 @@ export const generateSpedComplianceCheck = async (analysisData: AnalysisResult):
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const accounts = (analysisData.accounts || []).slice(0, 250).map(a => `${a.account_code || '?'} | ${a.account_name} | ${a.final_balance}`).join('\n');
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-        model: 'gemini-1.5-pro',
+        model: 'gemini-2.0-flash',
         contents: { parts: [{ text: `Auditoria SPED:\n\n${accounts}` }] },
         config: { systemInstruction: "Especialista em SPED ECD/ECF SP Assessoria.", temperature: 0.2 }
     }));
@@ -698,7 +723,7 @@ export const chatWithFinancialAgent = async (history: { role: 'user' | 'model', 
     if (!process.env.API_KEY) throw new Error("API Key not found.");
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     const chat: Chat = ai.chats.create({
-        model: 'gemini-1.5-pro',
+        model: 'gemini-2.0-flash',
         history: history,
         config: { systemInstruction: "Assistente contábil sênior SP Assessoria.", tools: [{ googleSearch: {} }] }
     });
@@ -718,7 +743,7 @@ export const generateComparisonAnalysis = async (rows: ComparisonRow[], period1:
         .join('\n');
 
     const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
-        model: 'gemini-1.5-pro',
+        model: 'gemini-2.0-flash',
         contents: { parts: [{ text: `Analise as variações financeiras entre os períodos ${period1} e ${period2}. Foque nas contas com maiores variações absolutas e percentuais:\n\n${topVariations}` }] },
         config: {
             systemInstruction: "Você é um Auditor Contábil Senior da SP Assessoria especializado em análise horizontal. Forneça insights detalhados sobre os motivos prováveis das variações e destaque riscos ou anomalias.",

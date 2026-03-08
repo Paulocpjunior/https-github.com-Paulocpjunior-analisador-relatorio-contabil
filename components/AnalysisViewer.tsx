@@ -289,8 +289,8 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts,
     };
 
     // --- OPINIONS FETCH ---
-    const fetchOpinion = async (type: 'financial' | 'costs' | 'compliance') => {
-        if (opinions[type] || loadingOpinions[type]) return;
+    const fetchOpinion = async (type: 'financial' | 'costs' | 'compliance', force = false) => {
+        if (!force && (opinions[type] || loadingOpinions[type])) return;
         setLoadingOpinions(prev => ({ ...prev, [type]: true }));
         try {
             let res = '';
@@ -303,11 +303,12 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts,
     };
 
     useEffect(() => {
-        // Auto-fetch all opinions on load
-        fetchOpinion('financial');
-        fetchOpinion('costs');
-        fetchOpinion('compliance');
-    }, []);
+        // Reset and Auto-fetch all opinions on NEW result
+        setOpinions({ financial: '', costs: '', compliance: '' });
+        fetchOpinion('financial', true);
+        fetchOpinion('costs', true);
+        fetchOpinion('compliance', true);
+    }, [result]);
 
     const handleAccountClick = (name: string) => {
         const query = encodeURIComponent(`O que é a conta contábil "${name}" e como deve ser seu lançamento correto?`);
