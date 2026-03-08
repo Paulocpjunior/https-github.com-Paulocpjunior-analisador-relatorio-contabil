@@ -18,6 +18,9 @@ export interface ExtractedAccount {
   ifrs18_category?: 'Operacional' | 'Investimento' | 'Financiamento' | null;
   level: number; // Hierarchy level (1, 2, 3...)
   is_synthetic: boolean; // True if it is a Group/Sub-group, False if Analytical
+  name_suggestion?: string;
+  posting_suggestion?: string;
+  audit_notes?: string;
 }
 
 export interface SpellCheck {

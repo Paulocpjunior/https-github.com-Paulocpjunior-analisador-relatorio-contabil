@@ -146,16 +146,27 @@ function parseFinancialNumber(val: any): number {
 function checkInversion(name: string, type: 'Debit' | 'Credit', finalBalance: number, indicator: string | null, code: string): boolean {
     const lowerName = name.toLowerCase();
     let expectedNature: 'Debit' | 'Credit' | 'Unknown' = 'Unknown';
-    if (code.startsWith('1')) expectedNature = 'Debit';
-    else if (code.startsWith('2')) expectedNature = 'Credit';
-    else if (code.startsWith('3') || lowerName.includes('receita') || lowerName.includes('faturamento') || lowerName.includes('venda')) expectedNature = 'Credit';
-    else if (code.startsWith('4') || lowerName.includes('despesa') || lowerName.includes('custo') || lowerName.includes('gastos')) expectedNature = 'Debit';
 
+    // Standard Accounting Logic (Brazil/IFRS)
+    if (code.startsWith('1')) expectedNature = 'Debit'; // Ativo
+    else if (code.startsWith('2')) expectedNature = 'Credit'; // Passivo / PL
+    else if (code.startsWith('3') || code.startsWith('4')) {
+        // Depends on chart of accounts, but usually 3 is Revenue and 4 is Expense
+        if (lowerName.includes('receita') || lowerName.includes('faturamento') || lowerName.includes('venda')) expectedNature = 'Credit';
+        else if (lowerName.includes('despesa') || lowerName.includes('custo') || lowerName.includes('gastos')) expectedNature = 'Debit';
+    }
+
+    // Deductions usually have reversed nature
     const deductionKeywords = [
-        'devolu', 'cancelamento', 'abatimento', 'imposto sobre', 'tributo sobre', 'cmv', 'cpv', 'csv'
+        'devolu', 'cancelamento', 'abatimento', 'imposto sobre', 'tributo sobre'
     ];
     if (deductionKeywords.some(k => lowerName.includes(k))) {
-        expectedNature = 'Debit';
+        expectedNature = (expectedNature === 'Debit') ? 'Credit' : 'Debit';
+    }
+
+    // Accummlated Depreciation / Amortization (Asset Deductions)
+    if (lowerName.includes('depreciação acumulada') || lowerName.includes('amortização acumulada')) {
+        expectedNature = 'Credit';
     }
 
     let actualNature: 'Debit' | 'Credit' = type;
@@ -163,10 +174,16 @@ function checkInversion(name: string, type: 'Debit' | 'Credit', finalBalance: nu
         if (indicator.toUpperCase() === 'D') actualNature = 'Debit';
         if (indicator.toUpperCase() === 'C') actualNature = 'Credit';
     } else {
-        if (finalBalance < 0) actualNature = 'Credit';
+        // If no indicator, we assume positive (for the account type) or look at sign
+        if (finalBalance < 0) actualNature = (type === 'Debit') ? 'Credit' : 'Debit';
     }
 
-    if (expectedNature !== 'Unknown') return false;
+    if (expectedNature !== 'Unknown' && expectedNature !== actualNature) {
+        // Special Case: Profit/Loss can be either
+        if (lowerName.includes('lucro') || lowerName.includes('prejuízo') || lowerName.includes('resultado')) return false;
+        return true;
+    }
+
     return false;
 }
 
@@ -550,36 +567,52 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
     }
 }
 
-async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, sampleAccounts: string[]): Promise<{ observations: string[], spellcheck: any[], period: string }> {
+async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, sampleAccounts: { code: string, name: string }[]): Promise<{
+    observations: string[],
+    spellcheck: any[],
+    period: string,
+    account_audits?: any[]
+}> {
     const prompt = `
     ATUE COMO: Auditor Contábil Senior SP Assessoria.
     DADOS: Doc: ${summaryData.document_type}, Resultado: ${summaryData.specific_result_value}.
-    AMOSTRA CONTAS: ${sampleAccounts.join('; ')}
+    AMOSTRA CONTAS (Código | Nome): ${sampleAccounts.map(a => `${a.code} | ${a.name}`).join('; ')}
     
     TAREFA: 
-    1. Identifique o período (ex: 01/2025).
-    2. Identifique erros ortográficos técnicos nas contas da amostra (ex: "Despessa" -> "Despesa").
+    1. Identifique o período (ex: 01/2025 ou 2024 completo).
+    2. Identifique erros ortográficos ou nomenclaturas contábeis fora do padrão (ex: "Despessa" -> "Despesa", "Adiant. Clie" -> "Adiantamento de Clientes").
+    3. Sinalize contas com nomes genéricos ou confusos e sugira a melhor opção técnica e o tipo de lançamento correto.
     
-    SAÍDA JSON:
+    SAÍDA JSON RIGOROSA:
     {
-      "period": "01/01/2025 a 31/12/2025",
-      "observations": ["Destaque 1"],
-      "spellcheck": [{"original_term": "RESEITA", "suggested_correction": "RECEITA", "confidence": "High"}]
+      "period": "string",
+      "observations": ["Destaque de auditoria 1", "Destaque 2"],
+      "spellcheck": [{"original_term": "string", "suggested_correction": "string", "confidence": "High"}],
+      "account_audits": [
+        {
+          "code": "string",
+          "name": "string",
+          "name_suggestion": "string",
+          "posting_suggestion": "string (ex: Lançar como despesa administrativa)",
+          "audit_notes": "string (ex: Conta com nome incompleto prejudica a clareza)"
+        }
+      ]
     }
     `;
     try {
         const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
             model: 'gemini-2.0-flash',
             contents: { parts: [{ text: prompt }] },
-            config: { responseMimeType: "application/json", temperature: 0.4 }
+            config: { responseMimeType: "application/json", temperature: 0.2 }
         }));
         const parsed = JSON.parse(response.text || '{}');
         return {
             period: parsed.period || "A definir",
             observations: parsed.observations || [],
-            spellcheck: parsed.spellcheck || []
+            spellcheck: parsed.spellcheck || [],
+            account_audits: parsed.account_audits || []
         };
-    } catch (e) { return { observations: [], spellcheck: [], period: "Indefinido" }; }
+    } catch (e) { return { observations: [], spellcheck: [], period: "Indefinido", account_audits: [] }; }
 }
 
 export const analyzeDocument = async (fileBase64: string, mimeType: string): Promise<AnalysisResult> => {
@@ -596,11 +629,32 @@ export const analyzeDocument = async (fileBase64: string, mimeType: string): Pro
 
     if (result.accounts.length === 0) throw new Error("Falha na interpretação das linhas. Tente outro formato.");
 
-    const sample = result.accounts.slice(0, 150).map(a => a.account_name);
+    // Sample formatting for AI Audit
+    const sample = result.accounts.slice(0, 150).map(a => ({
+        code: a.account_code || '',
+        name: a.account_name
+    }));
+
     const narrative = await generateNarrativeAnalysis(ai, result.summary, sample);
     result.summary.period = narrative.period || 'Período não identificado';
     result.summary.observations = narrative.observations || [];
     result.spell_check = narrative.spellcheck || [];
+
+    // Map audit suggestions back to accounts
+    if (narrative.account_audits) {
+        narrative.account_audits.forEach((audit: any) => {
+            const acc = result.accounts.find(a =>
+                (audit.code && a.account_code === audit.code) ||
+                (a.account_name.toLowerCase().includes(audit.name.toLowerCase()))
+            );
+            if (acc) {
+                acc.name_suggestion = audit.name_suggestion;
+                acc.posting_suggestion = audit.posting_suggestion;
+                acc.audit_notes = audit.audit_notes;
+            }
+        });
+    }
+
     return result;
 };
 

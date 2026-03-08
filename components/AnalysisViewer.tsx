@@ -302,7 +302,59 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts,
         finally { setLoadingOpinions(prev => ({ ...prev, [type]: false })); }
     };
 
-    useEffect(() => { fetchOpinion(activeOpinionTab); }, [activeOpinionTab]);
+    useEffect(() => {
+        // Auto-fetch all opinions on load
+        fetchOpinion('financial');
+        fetchOpinion('costs');
+        fetchOpinion('compliance');
+    }, []);
+
+    const handleAccountClick = (name: string) => {
+        const query = encodeURIComponent(`O que é a conta contábil "${name}" e como deve ser seu lançamento correto?`);
+        // Gemini Search Link is better for "exemplificar e sugerir correção"
+        window.open(`https://www.google.com/search?q=${query}`, '_blank');
+    };
+
+    const renderAccountName = (account: ExtractedAccount) => {
+        const correction = findCorrection(account.account_name);
+        const isInverted = account.possible_inversion;
+        const hasSuggestion = account.name_suggestion || account.audit_notes;
+
+        return (
+            <div className="flex flex-col">
+                <div className="flex items-center gap-2 flex-wrap">
+                    {isInverted && (
+                        <span title="Possível inversão de natureza (Débito/Crédito)" className="text-amber-500 cursor-help">⚠️</span>
+                    )}
+                    <button
+                        onClick={() => handleAccountClick(account.account_name)}
+                        className={`text-left hover:underline decoration-blue-400 group flex items-center gap-1 ${correction ? "line-through opacity-50 decoration-red-500" : "font-medium text-slate-700 dark:text-slate-300"}`}
+                        title="Ver explicação e exemplos sobre esta conta"
+                    >
+                        {account.account_name}
+                        <svg className="w-3 h-3 opacity-0 group-hover:opacity-100 text-blue-500 transition-opacity" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                        </svg>
+                    </button>
+                    {correction && (
+                        <span className="text-[10px] text-amber-600 bg-amber-50 px-1 border border-amber-200 rounded">
+                            {correction.suggested_correction}
+                        </span>
+                    )}
+                </div>
+                {account.account_code && <span className="text-[10px] text-slate-400 font-mono mt-0.5">{account.account_code}</span>}
+
+                {/* AI Suggestions / Audit Notes */}
+                {hasSuggestion && (
+                    <div className="mt-1 p-1 bg-blue-50 dark:bg-blue-900/10 border-l-2 border-blue-400 text-[10px] text-blue-700 dark:text-blue-300">
+                        {account.name_suggestion && <p><strong>Sugestão:</strong> {account.name_suggestion}</p>}
+                        {account.posting_suggestion && <p><strong>Lançamento:</strong> {account.posting_suggestion}</p>}
+                        {account.audit_notes && <p className="italic opacity-80">{account.audit_notes}</p>}
+                    </div>
+                )}
+            </div>
+        );
+    };
 
     const filteredAccounts = useMemo(() => {
         if (!accounts) return [];
@@ -327,22 +379,7 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts,
         return (
             <tr key={account.account_code || Math.random()} className={`text-xs border-b dark:border-slate-800 transition-colors ${isInverted ? 'bg-amber-50 hover:bg-amber-100 dark:bg-amber-900/20 border-l-4 border-l-amber-500' : 'hover:bg-slate-50 dark:hover:bg-slate-800'}`}>
                 <td className="pl-4 pr-2 py-3">
-                    <div className="flex flex-col">
-                        <div className="flex items-center gap-2 flex-wrap">
-                            {isInverted && (
-                                <span title="Possível inversão de natureza" className="text-amber-500">⚠️</span>
-                            )}
-                            <span className={correction ? "line-through opacity-50 decoration-red-500" : "font-medium text-slate-700 dark:text-slate-300"}>
-                                {account.account_name}
-                            </span>
-                            {correction && (
-                                <span className="text-[10px] text-amber-600 bg-amber-50 px-1 border border-amber-200 rounded">
-                                    {correction.suggested_correction}
-                                </span>
-                            )}
-                        </div>
-                        {account.account_code && <span className="text-[10px] text-slate-400 font-mono mt-0.5">{account.account_code}</span>}
-                    </div>
+                    {renderAccountName(account)}
                 </td>
                 <td className="px-2 py-3 text-right font-mono text-slate-500 border-r dark:border-slate-700">
                     {account.debit_value > 0 ? formatCurrency(account.debit_value) : '-'}
@@ -402,8 +439,8 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts,
                         key={tab.id}
                         onClick={() => setViewTab(tab.id as any)}
                         className={`flex-1 min-w-[140px] p-4 rounded-xl border text-left transition-all ${viewTab === tab.id
-                                ? 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-500/30'
-                                : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-700'
+                            ? 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-500/30'
+                            : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-700'
                             }`}
                     >
                         <span className="block font-black text-sm uppercase tracking-wide">{tab.label}</span>
@@ -602,10 +639,12 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts,
                                     <span>{formatCurrency(financialStructure.bpTotals.ac)}</span>
                                 </div>
                                 <div className="space-y-1">
-                                    {financialStructure.balanco.ativoCirculante.slice(0, 8).map((a, i) => (
-                                        <div key={i} className="flex justify-between text-xs text-slate-500">
-                                            <span className="truncate pr-2">{a.account_name}</span>
-                                            <span>{formatCurrency(a.final_balance)}</span>
+                                    {financialStructure.balanco.ativoCirculante.slice(0, 15).map((a, i) => (
+                                        <div key={i} className="flex justify-between items-start gap-2 py-1 border-b border-slate-50 dark:border-slate-700/50 last:border-0">
+                                            <div className="flex-1 min-w-0">
+                                                {renderAccountName(a)}
+                                            </div>
+                                            <span className="font-mono text-xs whitespace-nowrap">{formatCurrency(a.final_balance)}</span>
                                         </div>
                                     ))}
                                 </div>
@@ -616,10 +655,12 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts,
                                     <span>{formatCurrency(financialStructure.bpTotals.anc)}</span>
                                 </div>
                                 <div className="space-y-1">
-                                    {financialStructure.balanco.ativoNaoCirculante.slice(0, 8).map((a, i) => (
-                                        <div key={i} className="flex justify-between text-xs text-slate-500">
-                                            <span className="truncate pr-2">{a.account_name}</span>
-                                            <span>{formatCurrency(a.final_balance)}</span>
+                                    {financialStructure.balanco.ativoNaoCirculante.slice(0, 15).map((a, i) => (
+                                        <div key={i} className="flex justify-between items-start gap-2 py-1 border-b border-slate-50 dark:border-slate-700/50 last:border-0">
+                                            <div className="flex-1 min-w-0">
+                                                {renderAccountName(a)}
+                                            </div>
+                                            <span className="font-mono text-xs whitespace-nowrap">{formatCurrency(a.final_balance)}</span>
                                         </div>
                                     ))}
                                 </div>
@@ -640,10 +681,12 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts,
                                     <span>{formatCurrency(financialStructure.bpTotals.pc)}</span>
                                 </div>
                                 <div className="space-y-1">
-                                    {financialStructure.balanco.passivoCirculante.slice(0, 8).map((a, i) => (
-                                        <div key={i} className="flex justify-between text-xs text-slate-500">
-                                            <span className="truncate pr-2">{a.account_name}</span>
-                                            <span>{formatCurrency(a.final_balance)}</span>
+                                    {financialStructure.balanco.passivoCirculante.slice(0, 15).map((a, i) => (
+                                        <div key={i} className="flex justify-between items-start gap-2 py-1 border-b border-slate-50 dark:border-slate-700/50 last:border-0">
+                                            <div className="flex-1 min-w-0">
+                                                {renderAccountName(a)}
+                                            </div>
+                                            <span className="font-mono text-xs whitespace-nowrap">{formatCurrency(a.final_balance)}</span>
                                         </div>
                                     ))}
                                 </div>
@@ -654,10 +697,12 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts,
                                     <span>{formatCurrency(financialStructure.bpTotals.pnc)}</span>
                                 </div>
                                 <div className="space-y-1">
-                                    {financialStructure.balanco.passivoNaoCirculante.slice(0, 8).map((a, i) => (
-                                        <div key={i} className="flex justify-between text-xs text-slate-500">
-                                            <span className="truncate pr-2">{a.account_name}</span>
-                                            <span>{formatCurrency(a.final_balance)}</span>
+                                    {financialStructure.balanco.passivoNaoCirculante.slice(0, 15).map((a, i) => (
+                                        <div key={i} className="flex justify-between items-start gap-2 py-1 border-b border-slate-50 dark:border-slate-700/50 last:border-0">
+                                            <div className="flex-1 min-w-0">
+                                                {renderAccountName(a)}
+                                            </div>
+                                            <span className="font-mono text-xs whitespace-nowrap">{formatCurrency(a.final_balance)}</span>
                                         </div>
                                     ))}
                                 </div>
@@ -669,9 +714,11 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts,
                                 </div>
                                 <div className="space-y-1">
                                     {financialStructure.balanco.patrimonioLiquido.map((a, i) => (
-                                        <div key={i} className="flex justify-between text-xs text-slate-500">
-                                            <span className="truncate pr-2">{a.account_name}</span>
-                                            <span>{formatCurrency(a.final_balance)}</span>
+                                        <div key={i} className="flex justify-between items-start gap-2 py-1 border-b border-slate-50 dark:border-slate-700/50 last:border-0">
+                                            <div className="flex-1 min-w-0">
+                                                {renderAccountName(a)}
+                                            </div>
+                                            <span className="font-mono text-xs whitespace-nowrap">{formatCurrency(a.final_balance)}</span>
                                         </div>
                                     ))}
                                     {financialStructure.balanco.patrimonioLiquido.length === 0 && (
@@ -711,10 +758,12 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts,
                             </thead>
                             <tbody className="divide-y dark:divide-slate-700">
                                 {filteredAccounts.map((account, idx) => (
-                                    <tr key={idx} className="hover:bg-slate-50 dark:hover:bg-slate-800">
-                                        <td className="p-3 text-xs font-mono text-slate-500">{account.account_code}</td>
-                                        <td className="p-3">{account.account_name}</td>
-                                        <td className={`p-3 text-right font-mono ${account.final_balance < 0 ? 'text-red-500' : 'text-slate-700 dark:text-slate-300'}`}>
+                                    <tr key={idx} className={`hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors ${account.possible_inversion ? 'bg-amber-50/50' : ''}`}>
+                                        <td className="p-3 text-xs font-mono text-slate-500 border-r dark:border-slate-700">{account.account_code}</td>
+                                        <td className="px-4 py-2">
+                                            {renderAccountName(account)}
+                                        </td>
+                                        <td className={`p-3 text-right font-mono font-bold ${account.final_balance < 0 ? 'text-red-500' : 'text-slate-700 dark:text-slate-300'}`}>
                                             {formatCurrency(account.final_balance)}
                                         </td>
                                     </tr>
