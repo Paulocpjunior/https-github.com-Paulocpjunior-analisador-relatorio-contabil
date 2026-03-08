@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 import { ConsolidationResult } from '../types';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import ConsolidatedDashboard from './ConsolidatedDashboard';
 
 interface Props {
     data: ConsolidationResult;
@@ -12,13 +13,14 @@ interface Props {
 
 const ConsolidationViewer: React.FC<Props> = ({ data, onBack, collaboratorName }) => {
     const [searchTerm, setSearchTerm] = useState('');
+    const [viewTab, setViewTab] = useState<'dashboard' | 'table'>('table');
 
     const formatCurrency = (value: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
     const formattedDate = new Date(data.generatedAt).toLocaleString('pt-BR', { dateStyle: 'long', timeStyle: 'medium' });
 
     // Filter Logic
-    const filteredRows = data.rows.filter(r => 
-        r.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+    const filteredRows = data.rows.filter(r =>
+        r.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
         r.code.includes(searchTerm)
     );
 
@@ -27,18 +29,18 @@ const ConsolidationViewer: React.FC<Props> = ({ data, onBack, collaboratorName }
         const pageWidth = doc.internal.pageSize.width;
 
         // --- STANDARD HEADER (Reused logic, adapted for landscape) ---
-        doc.setFillColor(15, 23, 42); 
+        doc.setFillColor(15, 23, 42);
         doc.rect(0, 0, pageWidth, 40, 'F');
-        
+
         doc.setTextColor(255, 255, 255);
         doc.setFontSize(18);
         doc.setFont("helvetica", "bold");
         doc.text("SP ASSESSORIA CONTÁBIL", 14, 15);
-        
+
         doc.setFontSize(10);
         doc.setFont("helvetica", "normal");
         doc.text(`Relatório de Consolidação (Grupo Econômico)`, 14, 22);
-        
+
         // Metadata
         doc.text(`Empresas: ${data.companies.length} Entidades`, 14, 30);
         doc.text(`Grupo Base: ${data.groupName}`, 14, 35);
@@ -70,13 +72,13 @@ const ConsolidationViewer: React.FC<Props> = ({ data, onBack, collaboratorName }
                 // Dynamic columns will auto-size
             },
             didDrawPage: (d) => {
-                 // Footer
-                 const pageSize = doc.internal.pageSize;
-                 const pageHeight = pageSize.height ? pageSize.height : pageSize.getHeight();
-                 doc.setFontSize(8);
-                 doc.setTextColor(150);
-                 doc.text(`Página ${d.pageNumber} - Gerado por SP Assessoria System`, 14, pageHeight - 10);
-                 doc.text(`${formattedDate}`, pageWidth - 14, pageHeight - 10, { align: 'right' });
+                // Footer
+                const pageSize = doc.internal.pageSize;
+                const pageHeight = pageSize.height ? pageSize.height : pageSize.getHeight();
+                doc.setFontSize(8);
+                doc.setTextColor(150);
+                doc.text(`Página ${d.pageNumber} - Gerado por SP Assessoria System`, 14, pageHeight - 10);
+                doc.text(`${formattedDate}`, pageWidth - 14, pageHeight - 10, { align: 'right' });
             }
         });
 
@@ -84,8 +86,8 @@ const ConsolidationViewer: React.FC<Props> = ({ data, onBack, collaboratorName }
     };
 
     // Calculate Total Result for Summary Card
-    const totalResult = data.rows.find(r => 
-        r.name.toLowerCase().includes('lucro líquido') || 
+    const totalResult = data.rows.find(r =>
+        r.name.toLowerCase().includes('lucro líquido') ||
         r.name.toLowerCase().includes('resultado do exercício') ||
         r.name.toLowerCase().includes('prejuízo líquido')
     )?.total || 0;
@@ -116,57 +118,87 @@ const ConsolidationViewer: React.FC<Props> = ({ data, onBack, collaboratorName }
                 </div>
             </div>
 
+            {/* TAB TOGGLE: Dashboard vs Matrix */}
+            <div className="flex overflow-x-auto gap-2 pb-2 print:hidden">
+                <button
+                    onClick={() => setViewTab('table')}
+                    className={`flex-1 min-w-[200px] p-4 rounded-xl border text-left transition-all ${viewTab === 'table'
+                        ? 'bg-purple-600 border-purple-600 text-white shadow-lg shadow-purple-500/30'
+                        : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-700'
+                        }`}
+                >
+                    <span className="block font-black text-sm uppercase tracking-wide">📑 Matriz de Consolidação</span>
+                    <span className={`text-xs ${viewTab === 'table' ? 'text-purple-100' : 'text-slate-400'}`}>Tabela Completa</span>
+                </button>
+                <button
+                    onClick={() => setViewTab('dashboard')}
+                    className={`flex-1 min-w-[200px] p-4 rounded-xl border text-left transition-all ${viewTab === 'dashboard'
+                        ? 'bg-purple-600 border-purple-600 text-white shadow-lg shadow-purple-500/30'
+                        : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-700'
+                        }`}
+                >
+                    <span className="block font-black text-sm uppercase tracking-wide">📈 Resumo/Gráficos</span>
+                    <span className={`text-xs ${viewTab === 'dashboard' ? 'text-purple-100' : 'text-slate-400'}`}>Análise Visual do Grupo</span>
+                </button>
+            </div>
+
             {/* Matrix View */}
-            <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden">
-                <div className="p-4 border-b dark:border-slate-700 flex justify-between items-center bg-slate-50 dark:bg-slate-900/50">
-                     <input 
-                        type="text" 
-                        placeholder="Filtrar contas consolidadas..." 
-                        value={searchTerm}
-                        onChange={e => setSearchTerm(e.target.value)}
-                        className="p-2 text-sm rounded border w-64 dark:bg-slate-700 dark:text-white"
-                    />
-                    <div className="text-sm font-bold text-slate-700 dark:text-slate-300">
-                        Resultado Aglutinado: <span className={totalResult >= 0 ? 'text-green-600' : 'text-red-600'}>{formatCurrency(totalResult)}</span>
+            {viewTab === 'table' && (
+                <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden">
+                    <div className="p-4 border-b dark:border-slate-700 flex justify-between items-center bg-slate-50 dark:bg-slate-900/50">
+                        <input
+                            type="text"
+                            placeholder="Filtrar contas consolidadas..."
+                            value={searchTerm}
+                            onChange={e => setSearchTerm(e.target.value)}
+                            className="p-2 text-sm rounded border w-64 dark:bg-slate-700 dark:text-white"
+                        />
+                        <div className="text-sm font-bold text-slate-700 dark:text-slate-300">
+                            Resultado Aglutinado: <span className={totalResult >= 0 ? 'text-green-600' : 'text-red-600'}>{formatCurrency(totalResult)}</span>
+                        </div>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                        <table className="w-full text-sm text-left">
+                            <thead className="bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-400 font-bold sticky top-0 z-10">
+                                <tr>
+                                    <th className="p-3 border-r dark:border-slate-700 min-w-[100px]">Código</th>
+                                    <th className="p-3 border-r dark:border-slate-700 min-w-[200px]">Conta</th>
+                                    {data.companies.map(c => (
+                                        <th key={c.id} className="p-3 text-right border-r dark:border-slate-700 min-w-[140px] bg-slate-50 dark:bg-slate-800">
+                                            <div className="truncate w-full" title={c.name}>{c.name}</div>
+                                            <div className="text-[9px] font-mono font-normal text-slate-400">{c.cnpj}</div>
+                                        </th>
+                                    ))}
+                                    <th className="p-3 text-right bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300 min-w-[140px]">
+                                        TOTAL GRUPO
+                                    </th>
+                                </tr>
+                            </thead>
+                            <tbody className="divide-y dark:divide-slate-700">
+                                {filteredRows.map((row, idx) => (
+                                    <tr key={idx} className={`hover:bg-slate-50 dark:hover:bg-slate-800 ${row.is_synthetic ? 'font-bold bg-slate-50/50' : ''}`}>
+                                        <td className="p-3 font-mono text-xs text-slate-500 border-r dark:border-slate-700">{row.code}</td>
+                                        <td className="p-3 border-r dark:border-slate-700 truncate max-w-xs" title={row.name}>{row.name}</td>
+                                        {data.companies.map(c => (
+                                            <td key={c.id} className="p-3 text-right font-mono text-slate-500 border-r dark:border-slate-700">
+                                                {formatCurrency(row.values[c.id])}
+                                            </td>
+                                        ))}
+                                        <td className={`p-3 text-right font-mono font-bold bg-purple-50/30 dark:bg-purple-900/10 ${row.total < 0 ? 'text-red-600' : 'text-slate-800 dark:text-slate-200'}`}>
+                                            {formatCurrency(row.total)}
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </table>
                     </div>
                 </div>
-                
-                <div className="overflow-x-auto">
-                    <table className="w-full text-sm text-left">
-                        <thead className="bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-400 font-bold sticky top-0 z-10">
-                            <tr>
-                                <th className="p-3 border-r dark:border-slate-700 min-w-[100px]">Código</th>
-                                <th className="p-3 border-r dark:border-slate-700 min-w-[200px]">Conta</th>
-                                {data.companies.map(c => (
-                                    <th key={c.id} className="p-3 text-right border-r dark:border-slate-700 min-w-[140px] bg-slate-50 dark:bg-slate-800">
-                                        <div className="truncate w-full" title={c.name}>{c.name}</div>
-                                        <div className="text-[9px] font-mono font-normal text-slate-400">{c.cnpj}</div>
-                                    </th>
-                                ))}
-                                <th className="p-3 text-right bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300 min-w-[140px]">
-                                    TOTAL GRUPO
-                                </th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y dark:divide-slate-700">
-                            {filteredRows.map((row, idx) => (
-                                <tr key={idx} className={`hover:bg-slate-50 dark:hover:bg-slate-800 ${row.is_synthetic ? 'font-bold bg-slate-50/50' : ''}`}>
-                                    <td className="p-3 font-mono text-xs text-slate-500 border-r dark:border-slate-700">{row.code}</td>
-                                    <td className="p-3 border-r dark:border-slate-700 truncate max-w-xs" title={row.name}>{row.name}</td>
-                                    {data.companies.map(c => (
-                                        <td key={c.id} className="p-3 text-right font-mono text-slate-500 border-r dark:border-slate-700">
-                                            {formatCurrency(row.values[c.id])}
-                                        </td>
-                                    ))}
-                                    <td className={`p-3 text-right font-mono font-bold bg-purple-50/30 dark:bg-purple-900/10 ${row.total < 0 ? 'text-red-600' : 'text-slate-800 dark:text-slate-200'}`}>
-                                        {formatCurrency(row.total)}
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
+            )}
+
+            {viewTab === 'dashboard' && (
+                <ConsolidatedDashboard data={data} />
+            )}
         </div>
     );
 };
