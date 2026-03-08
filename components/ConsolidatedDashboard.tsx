@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { ConsolidationResult, ConsolidatedRow } from '../types';
 import {
     BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
@@ -35,12 +35,13 @@ const CustomTooltip = ({ active, payload, label }: any) => {
 };
 
 const ConsolidatedDashboard: React.FC<Props> = ({ data }) => {
+    const [selectedCodes, setSelectedCodes] = useState<string[]>([]);
+    const [searchTerm, setSearchTerm] = useState('');
 
     const dashboardData = useMemo(() => {
         if (!data || !data.rows || data.rows.length === 0) return null;
 
-        // Match helper (Analytical level)
-        const activeRows = data.rows.filter(r => !r.is_synthetic);
+        const analyticalRows = data.rows.filter(r => !r.is_synthetic);
         const match = (row: ConsolidatedRow, codes: string[], terms: string[]) => {
             const c = row.code || '';
             const n = row.name.toLowerCase();
@@ -48,24 +49,35 @@ const ConsolidatedDashboard: React.FC<Props> = ({ data }) => {
         };
 
         // --- PIE CHART: GROUP REVENUE CONTRIBUTION ---
-        // Find Total Revenue Row (Synthetic usually 3.1 or 3.1.1 or top level)
         const revRows = data.rows.filter(r => r.code.startsWith('3.1') && r.is_synthetic).sort((a, b) => b.total - a.total);
-        const mainRevRow = revRows[0]; // Assume highest logical grouping is Total Revenue
+        const mainRevRow = revRows[0];
 
         let revenuePie = [];
         if (mainRevRow) {
             revenuePie = data.companies.map((c, idx) => ({
-                name: c.name.split(' ')[0], // short name
+                name: c.name.split(' ')[0],
                 value: Math.abs(mainRevRow.values[c.id] || 0),
                 color: COMPANY_COLORS[idx % COMPANY_COLORS.length]
             })).filter(d => d.value > 0);
         }
 
-        // --- BAR CHART: TOP EXPENSES BY COMPANY ---
-        const expenses = activeRows.filter(a => match(a, ['4', '3.2', '3.3'], ['despesa', 'custo', 'salário', 'imposto sobre', 'juros']))
-            .sort((a, b) => Math.abs(b.total) - Math.abs(a.total)).slice(0, 5);
+        // --- FILTER LOGIC ---
+        let targetReceitas: ConsolidatedRow[] = [];
+        let targetDespesas: ConsolidatedRow[] = [];
 
-        const expChartData = expenses.map(row => {
+        if (selectedCodes.length > 0) {
+            const selected = analyticalRows.filter(r => selectedCodes.includes(r.code));
+            targetReceitas = selected.filter(r => r.code.startsWith('3.1') || r.name.toLowerCase().includes('receita') || r.name.toLowerCase().includes('venda'));
+            targetDespesas = selected.filter(r => !targetReceitas.includes(r));
+        } else {
+            targetDespesas = analyticalRows.filter(a => match(a, ['4', '3.2', '3.3'], ['despesa', 'custo', 'salário', 'imposto sobre', 'juros']))
+                .sort((a, b) => Math.abs(b.total) - Math.abs(a.total)).slice(0, 5);
+
+            targetReceitas = analyticalRows.filter(a => (a.code?.startsWith('3.1') || match(a, [], ['receita', 'venda', 'serviços'])))
+                .sort((a, b) => Math.abs(b.total) - Math.abs(a.total)).slice(0, 5);
+        }
+
+        const expChartData = targetDespesas.map(row => {
             const chartEntry: any = { name: row.name.substring(0, 15) + '...', full: row.name };
             data.companies.forEach(c => {
                 chartEntry[c.name] = Math.abs(row.values[c.id] || 0);
@@ -73,11 +85,7 @@ const ConsolidatedDashboard: React.FC<Props> = ({ data }) => {
             return chartEntry;
         });
 
-        // --- BAR CHART: TOP REVENUES BY COMPANY ---
-        const revenues = activeRows.filter(a => (a.code?.startsWith('3.1') || match(a, [], ['receita', 'venda', 'serviços'])))
-            .sort((a, b) => Math.abs(b.total) - Math.abs(a.total)).slice(0, 5);
-
-        const revChartData = revenues.map(row => {
+        const revChartData = targetReceitas.map(row => {
             const chartEntry: any = { name: row.name.substring(0, 15) + '...', full: row.name };
             data.companies.forEach(c => {
                 chartEntry[c.name] = Math.abs(row.values[c.id] || 0);
@@ -85,8 +93,21 @@ const ConsolidatedDashboard: React.FC<Props> = ({ data }) => {
             return chartEntry;
         });
 
-        return { revenuePie, expChartData, revChartData, mainRevRowName: mainRevRow?.name };
-    }, [data]);
+        return { revenuePie, expChartData, revChartData, mainRevRowName: mainRevRow?.name, analyticalRows };
+    }, [data, selectedCodes]);
+
+    const filteredOptions = useMemo(() => {
+        if (!dashboardData?.analyticalRows) return [];
+        return dashboardData.analyticalRows.filter(r =>
+            (r.name.toLowerCase().includes(searchTerm.toLowerCase()) || r.code.includes(searchTerm)) &&
+            !selectedCodes.includes(r.code)
+        ).slice(0, 8);
+    }, [dashboardData?.analyticalRows, searchTerm, selectedCodes]);
+
+    const toggleAccount = (code: string) => {
+        setSelectedCodes(prev => prev.includes(code) ? prev.filter(c => c !== code) : [...prev, code]);
+        setSearchTerm('');
+    };
 
     if (!dashboardData) return <div className="p-4 text-center text-slate-500">Dados insuficientes para gerar gráficos do Grupo.</div>;
 
@@ -111,6 +132,67 @@ const ConsolidatedDashboard: React.FC<Props> = ({ data }) => {
                 </svg>
                 Dashboard do Grupo Econômico
             </h3>
+
+            {/* Account Selector UI */}
+            <div className="bg-white dark:bg-slate-800 p-6 rounded-3xl shadow-sm border border-purple-100 dark:border-slate-700">
+                <div className="flex flex-col md:flex-row gap-4 items-start md:items-center">
+                    <div className="flex-1 w-full relative">
+                        <label className="block text-[10px] font-black text-slate-400 uppercase mb-1 tracking-widest">Personalizar Visualização do Grupo</label>
+                        <div className="relative">
+                            <input
+                                type="text"
+                                placeholder="Selecione contas para comparar entre todas as empresas..."
+                                value={searchTerm}
+                                onChange={e => setSearchTerm(e.target.value)}
+                                className="w-full bg-slate-50 dark:bg-slate-900 border-none rounded-xl py-3 pl-10 pr-4 text-sm focus:ring-2 focus:ring-purple-500 transition-all dark:text-white"
+                            />
+                            <svg className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" /></svg>
+                        </div>
+
+                        {searchTerm && (
+                            <div className="absolute z-50 mt-2 w-full bg-white dark:bg-slate-800 shadow-2xl rounded-2xl border border-slate-100 dark:border-slate-700 overflow-hidden">
+                                {filteredOptions.length > 0 ? filteredOptions.map(opt => (
+                                    <button
+                                        key={opt.code}
+                                        onClick={() => toggleAccount(opt.code)}
+                                        className="w-full px-4 py-3 text-left hover:bg-purple-50 dark:hover:bg-purple-900/30 flex justify-between items-center group transition-colors"
+                                    >
+                                        <div className="flex flex-col">
+                                            <span className="text-xs font-black text-slate-700 dark:text-slate-200">{opt.name}</span>
+                                            <span className="text-[10px] font-mono text-slate-400">{opt.code}</span>
+                                        </div>
+                                        <svg className="w-4 h-4 text-purple-500 opacity-0 group-hover:opacity-100" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 4v16m8-8H4" /></svg>
+                                    </button>
+                                )) : <div className="p-4 text-center text-xs text-slate-400">Nenhuma conta encontrada.</div>}
+                            </div>
+                        )}
+                    </div>
+
+                    <div className="flex-shrink-0">
+                        {selectedCodes.length > 0 && (
+                            <button
+                                onClick={() => setSelectedCodes([])}
+                                className="text-[10px] font-black text-red-500 hover:text-red-700 p-2 uppercase"
+                            >
+                                Limpar Seleção
+                            </button>
+                        )}
+                    </div>
+                </div>
+
+                {selectedCodes.length > 0 && (
+                    <div className="mt-4 flex flex-wrap gap-2">
+                        {data.rows.filter(r => selectedCodes.includes(r.code)).map(r => (
+                            <div key={r.code} className="bg-purple-600 text-white pl-3 pr-1 py-1 rounded-full flex items-center gap-2 shadow-md shadow-purple-500/20">
+                                <span className="text-[10px] font-black">{r.name}</span>
+                                <button onClick={() => toggleAccount(r.code)} className="p-1 hover:bg-white/20 rounded-full transition-colors">
+                                    <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M6 18L18 6M6 6l12 12" /></svg>
+                                </button>
+                            </div>
+                        ))}
+                    </div>
+                )}
+            </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
 
