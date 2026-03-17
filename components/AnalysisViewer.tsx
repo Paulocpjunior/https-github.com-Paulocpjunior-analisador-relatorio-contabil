@@ -1,4 +1,3 @@
-
 import React, { useState, useMemo, useEffect } from 'react';
 import { AnalysisResult, ExtractedAccount, HeaderData } from '../types';
 import { generateFinancialInsight, generateCMVAnalysis, generateSpedComplianceCheck } from '../services/geminiService';
@@ -71,7 +70,28 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts,
 
         // --- DRE (INCOME STATEMENT) ---
         const dre = {
-            receitaBruta: activeData.filter(a => (a.account_code?.startsWith('3.1') || match(a, [], ['receita bruta', 'venda de', 'faturamento', 'serviços prestados'])) && a.type === 'Credit'),
+            // FIX: Receita Bruta zerada no balancete
+            // PROBLEMA: contas analíticas do balancete têm código interno "0002" (não "3.1.x"),
+            // então `code.startsWith('3.1')` = false E type = 'Debit' → filtro excluía todas as receitas.
+            // SOLUÇÃO: buscar em TODAS as contas (incluindo sintéticas) por código 3.x,
+            // e usar a conta de menor nível não-sintética com final_balance > 0.
+            // Para contas sem código contábil, manter o match por nome + type Credit.
+            receitaBruta: (() => {
+                // 1ª tentativa: contas com código iniciando em 3.1 (qualquer nível)
+                const byCode = accounts.filter(a =>
+                    !a.is_synthetic &&
+                    a.account_code &&
+                    (a.account_code.startsWith('3.1') || a.account_code.startsWith('3')) &&
+                    Math.abs(a.final_balance) > 0
+                );
+                if (byCode.length > 0) return byCode;
+                // 2ª tentativa: match por nome (sem exigir type Credit — type pode estar errado no balancete)
+                return accounts.filter(a =>
+                    !a.is_synthetic &&
+                    match(a, [], ['receita bruta', 'venda de', 'venda a', 'faturamento', 'serviços prestados']) &&
+                    Math.abs(a.final_balance) > 0
+                );
+            })(),
             deducoes: activeData.filter(a => match(a, [], ['imposto sobre', 'devoluç', 'cancelamento', 'abatimento']) || (a.account_name.includes('Simples') && a.type === 'Debit')),
             custos: activeData.filter(a => match(a, ['3.2', '3.3'], ['custo', 'cmv', 'cpv', 'csv'])),
             despesasOp: activeData.filter(a => (a.account_code?.startsWith('3') || a.account_code?.startsWith('4')) && match(a, ['4'], ['despesa', 'salário', 'aluguel', 'energia', 'água', 'luz', 'telefone', 'honorários', 'pro labore']) && !match(a, [], ['custo', 'cmv', 'imposto sobre', 'financeir'])),
