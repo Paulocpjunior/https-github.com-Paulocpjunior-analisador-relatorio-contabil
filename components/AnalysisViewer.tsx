@@ -1,814 +1,657 @@
-import React, { useState, useMemo, useEffect } from 'react';
-import { AnalysisResult, ExtractedAccount, HeaderData } from '../types';
-import { generateFinancialInsight, generateCMVAnalysis, generateSpedComplianceCheck } from '../services/geminiService';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from 'recharts';
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
-import VisualDashboard from './VisualDashboard';
+import { GoogleGenAI, GenerateContentResponse, HarmCategory, HarmBlockThreshold, Chat } from "@google/genai";
+import { AnalysisResult, ExtractedAccount, ComparisonRow } from "../types";
 
-interface Props {
-    result: AnalysisResult;
-    headerData: HeaderData;
-    previousAccounts?: ExtractedAccount[];
-    analysisTimestamp?: string | null;
+async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, baseDelay = 3000): Promise<T> {
+    try {
+        return await fn();
+    } catch (error: any) {
+        const message = error?.message || '';
+        const status = error?.status || error?.code;
+        const isClientError =
+            status === 400 || status === 401 || status === 403 || status === 404 ||
+            message.includes('400') || message.includes('401') || message.includes('403') ||
+            message.includes('404') || message.includes('not found') ||
+            message.includes('API_KEY_INVALID') || message.includes('API key not valid');
+        if (isClientError) throw error;
+        if (retries > 0) {
+            console.warn(`API Error (${status}). Retrying in ${baseDelay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, baseDelay));
+            return retryWithBackoff(fn, retries - 1, baseDelay * 2);
+        }
+        throw error;
+    }
 }
 
-const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts, analysisTimestamp }) => {
-    const [searchTerm, setSearchTerm] = useState('');
-    const [viewTab, setViewTab] = useState<'dashboard' | 'charts' | 'dre' | 'bp' | 'list'>('dashboard');
-    const [activeOpinionTab, setActiveOpinionTab] = useState<'financial' | 'costs' | 'compliance'>('financial');
+function sanitizeBase64(base64: string): string {
+    if (!base64) return "";
+    const raw = base64.includes(',') ? base64.split(',')[1] : base64;
+    // FIX: \/ escapado — evita SyntaxError no Safari
+    const cleaned = raw.replace(/[^A-Za-z0-9+\/=]/g, '');
+    const contentWithoutPadding = cleaned.replace(/=/g, '');
+    const remainder = contentWithoutPadding.length % 4;
+    if (remainder === 0) return contentWithoutPadding;
+    if (remainder === 2) return contentWithoutPadding + '==';
+    if (remainder === 3) return contentWithoutPadding + '=';
+    return contentWithoutPadding.substring(0, contentWithoutPadding.length - 1);
+}
 
-    const formattedDate = analysisTimestamp
-        ? new Date(analysisTimestamp).toLocaleString('pt-BR', { dateStyle: 'long', timeStyle: 'medium' })
-        : new Date().toLocaleString('pt-BR', { dateStyle: 'long', timeStyle: 'medium' });
+function customBase64ToUint8Array(base64: string): Uint8Array {
+    const raw = base64.includes(',') ? base64.split(',')[1] : base64;
+    // FIX: \/ escapado — evita SyntaxError no Safari
+    const cleaned = raw.replace(/[^A-Za-z0-9+\/]/g, '');
+    const len = cleaned.length;
+    let bufferLength = Math.floor((len * 3) / 4);
+    if (cleaned[len - 1] === '=') bufferLength--;
+    if (cleaned[len - 2] === '=') bufferLength--;
+    const bytes = new Uint8Array(bufferLength);
+    const lookup = new Uint8Array(256);
+    const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (let i = 0; i < alphabet.length; i++) lookup[alphabet.charCodeAt(i)] = i;
+    let p = 0;
+    for (let i = 0; i < len; i += 4) {
+        const e1 = lookup[cleaned.charCodeAt(i)];
+        const e2 = lookup[cleaned.charCodeAt(i + 1)];
+        const e3 = lookup[cleaned.charCodeAt(i + 2)];
+        const e4 = lookup[cleaned.charCodeAt(i + 3)];
+        bytes[p++] = (e1 << 2) | (e2 >> 4);
+        if (p < bufferLength) bytes[p++] = ((e2 & 15) << 4) | (e3 >> 2);
+        if (p < bufferLength) bytes[p++] = ((e3 & 3) << 6) | (e4 & 63);
+    }
+    return bytes;
+}
 
-    const [opinions, setOpinions] = useState({ financial: '', costs: '', compliance: '' });
-    const [loadingOpinions, setLoadingOpinions] = useState({ financial: false, costs: false, compliance: false });
+function safeDecodeBase64(str: string): string {
+    try {
+        const bytes = customBase64ToUint8Array(str);
+        return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+    } catch (e) {
+        return '';
+    }
+}
 
-    const formatCurrency = (value: number) => new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(value);
+function parseFinancialNumber(val: any): number {
+    if (typeof val === 'number') return val;
+    if (!val) return 0;
+    let clean = String(val).trim();
+    if (!clean || clean === '-' || clean === '–') return 0;
+    clean = clean.replace(/^R\$\s?/, '').replace(/\s/g, '');
+    clean = clean.replace(/O/gi, '0').replace(/l/g, '1').replace(/[^0-9.,\-()]/g, '');
+    const isNegativeParens = /^\(.*\)$/.test(clean);
+    if (isNegativeParens) clean = clean.replace(/[()]/g, '');
+    const lastDotIndex = clean.lastIndexOf('.');
+    const lastCommaIndex = clean.lastIndexOf(',');
+    if (lastCommaIndex > lastDotIndex) {
+        clean = clean.replace(/\./g, '').replace(',', '.');
+    } else if (lastDotIndex > lastCommaIndex) {
+        clean = clean.replace(/,/g, '');
+    } else {
+        if (clean.includes(',')) clean = clean.replace(',', '.');
+    }
+    let num = parseFloat(clean);
+    if (isNaN(num)) return 0;
+    if (isNegativeParens) num = -Math.abs(num);
+    return num;
+}
 
-    const { summary, accounts = [], spell_check = [] } = result || {};
+function checkInversion(name: string, type: 'Debit' | 'Credit', finalBalance: number, indicator: string | null, code: string): boolean {
+    const lowerName = name.toLowerCase();
+    let expectedNature: 'Debit' | 'Credit' | 'Unknown' = 'Unknown';
+    if (code.startsWith('1')) expectedNature = 'Debit';
+    else if (code.startsWith('2')) expectedNature = 'Credit';
+    else if (code.startsWith('3') || code.startsWith('4')) {
+        if (lowerName.includes('receita') || lowerName.includes('faturamento') || lowerName.includes('venda')) expectedNature = 'Credit';
+        else if (lowerName.includes('despesa') || lowerName.includes('custo') || lowerName.includes('gastos')) expectedNature = 'Debit';
+    }
+    const deductionKeywords = ['devolu', 'cancelamento', 'abatimento', 'imposto sobre', 'tributo sobre'];
+    if (deductionKeywords.some(k => lowerName.includes(k))) {
+        expectedNature = (expectedNature === 'Debit') ? 'Credit' : 'Debit';
+    }
+    if (lowerName.includes('depreciação acumulada') || lowerName.includes('amortização acumulada')) {
+        expectedNature = 'Credit';
+    }
+    let actualNature: 'Debit' | 'Credit' = type;
+    if (indicator) {
+        if (indicator.toUpperCase() === 'D') actualNature = 'Debit';
+        if (indicator.toUpperCase() === 'C') actualNature = 'Credit';
+    } else {
+        if (finalBalance < 0) actualNature = (type === 'Debit') ? 'Credit' : 'Debit';
+    }
+    if (expectedNature !== 'Unknown' && expectedNature !== actualNature) {
+        if (lowerName.includes('lucro') || lowerName.includes('prejuízo') || lowerName.includes('resultado')) return false;
+        return true;
+    }
+    return false;
+}
 
-    // --- LOGIC: STRUCTURE BUILDER ---
+function mapValuesToColumns(numbers: number[], docType: string): { initial: number, debit: number, credit: number, final: number } {
+    const count = numbers.length;
+    let initial = 0, debit = 0, credit = 0, final = 0;
+    if (docType === 'DRE') {
+        if (count > 0) final = numbers[0];
+        return { initial, debit, credit, final };
+    }
+    // FIX: agora o prompt extrai 4 valores (SDO_ANT | DEB | CRED | SDO_ATUAL)
+    // count >= 4 já existia — mas agora virá com dados reais de débito e crédito
+    if (count === 1) { final = numbers[0]; }
+    else if (count === 2) { initial = numbers[0]; final = numbers[1]; }
+    else if (count === 3) { debit = numbers[0]; credit = numbers[1]; final = numbers[2]; }
+    else if (count >= 4) { initial = numbers[0]; debit = numbers[1]; credit = numbers[2]; final = numbers[3]; }
+    return { initial, debit, credit, final };
+}
 
-    const financialStructure = useMemo(() => {
-        const activeData = accounts.filter(a => !a.is_synthetic);
+function normalizeFinancialData(rawLines: string[], docType: string): AnalysisResult {
+    const accounts: ExtractedAccount[] = [];
 
-        // Helper to match account by code OR name keywords
-        const match = (acc: ExtractedAccount, codes: string[], terms: string[]) => {
-            const c = acc.account_code || '';
-            const n = acc.account_name.toLowerCase();
-            return codes.some(prefix => c.startsWith(prefix)) || terms.some(term => n.includes(term));
-        };
+    rawLines.forEach(line => {
+        let cleanLine = line.trim();
+        if (!cleanLine || cleanLine.length < 5) return;
+        if (/^(doctype|data|conta|descri|saldo|débito|crédito|página|page|cod|cód|movimento|transporte|historico|empresa|cnpj)/i.test(cleanLine)) return;
+        if (/^\|?[\s-]+\|?$/.test(cleanLine)) return;
 
-        // --- BALANÇO PATRIMONIAL ---
-        const balanco = {
-            ativoCirculante: activeData.filter(a => match(a, ['1.1'], ['circulante', 'caixa', 'banco', 'cliente', 'estoque', 'adiantamento'])),
-            ativoNaoCirculante: activeData.filter(a => match(a, ['1.2', '1.3', '1.4'], ['não circulante', 'nao circulante', 'imobilizado', 'intangivel', 'investimento'])),
-            passivoCirculante: activeData.filter(a => match(a, ['2.1'], ['circulante', 'fornecedor', 'imposto', 'salario', 'obrigação'])),
-            passivoNaoCirculante: activeData.filter(a => match(a, ['2.2'], ['não circulante', 'nao circulante', 'longo prazo', 'financiamento'])),
-            patrimonioLiquido: activeData.filter(a => match(a, ['2.3', '2.4'], ['patrimônio', 'patrimonio', 'capital', 'reservas', 'lucros acumulados', 'prejuízos acumulados']))
-        };
+        let code = '';
+        let name = '';
+        let valuesPart: number[] = [];
+        let type: 'Debit' | 'Credit' = 'Debit';
+        let rawIndicator: string | null = null;
 
-        // Sums
-        const sum = (list: ExtractedAccount[]) => list.reduce((acc, item) => acc + Math.abs(item.final_balance), 0);
+        if (cleanLine.includes('|')) {
+            const parts = cleanLine.split('|').map(p => p.trim()).filter(p => p.length > 0);
+            if (parts.length >= 2) {
+                const firstLooksLikeCode = /^[\d.]+$/.test(parts[0]) && parts[0].length < 20;
+                // FIX: detectar código interno (0000000502) ou código com parênteses
+                const firstIsInternal = /^\(?\d{6,}\)?$/.test(parts[0].trim());
 
-        const bpTotals = {
-            ac: sum(balanco.ativoCirculante),
-            anc: sum(balanco.ativoNaoCirculante),
-            pc: sum(balanco.passivoCirculante),
-            pnc: sum(balanco.passivoNaoCirculante),
-            pl: sum(balanco.patrimonioLiquido)
-        };
-
-        const totalAtivo = bpTotals.ac + bpTotals.anc;
-        const totalPassivo = bpTotals.pc + bpTotals.pnc + bpTotals.pl;
-
-        if (bpTotals.pl === 0 && Math.abs(totalAtivo - totalPassivo) > 1) {
-            bpTotals.pl = totalAtivo - (bpTotals.pc + bpTotals.pnc);
+                if (firstLooksLikeCode) {
+                    code = parts[0];
+                    name = parts[1];
+                    for (let i = 2; i < parts.length; i++) {
+                        // FIX: capturar indicador D/C que vem junto com o último valor
+                        // Ex: "86.898.954,21 C" — separar número do indicador
+                        const partClean = parts[i].replace(/\s+[DC]$/i, '').trim();
+                        const indMatch = parts[i].match(/\s+([DC])$/i);
+                        if (indMatch && i === parts.length - 1) rawIndicator = indMatch[1].toUpperCase();
+                        if (/^[DC%]$/i.test(parts[i])) continue;
+                        const val = parseFinancialNumber(partClean || parts[i]);
+                        valuesPart.push(val);
+                    }
+                } else if (firstIsInternal) {
+                    // Conta analítica com código interno: ignora código interno, usa próximo campo
+                    code = parts[1] || '';
+                    name = parts[2] || parts[1];
+                    for (let i = 3; i < parts.length; i++) {
+                        const partClean = parts[i].replace(/\s+[DC]$/i, '').trim();
+                        const indMatch = parts[i].match(/\s+([DC])$/i);
+                        if (indMatch && i === parts.length - 1) rawIndicator = indMatch[1].toUpperCase();
+                        if (/^[DC%]$/i.test(parts[i])) continue;
+                        const val = parseFinancialNumber(partClean || parts[i]);
+                        valuesPart.push(val);
+                    }
+                } else {
+                    name = parts[0];
+                    for (let i = 1; i < parts.length; i++) {
+                        const partClean = parts[i].replace(/\s+[DC]$/i, '').trim();
+                        const indMatch = parts[i].match(/\s+([DC])$/i);
+                        if (indMatch && i === parts.length - 1) rawIndicator = indMatch[1].toUpperCase();
+                        if (/^[DC%]$/i.test(parts[i])) continue;
+                        valuesPart.push(parseFinancialNumber(partClean || parts[i]));
+                    }
+                }
+            }
         }
 
-        // --- DRE (INCOME STATEMENT) ---
-        const dre = {
-            // FIX: Receita Bruta zerada no balancete analítico
-            // RAIZ: conta analítica tem código "0002" (interno do sistema), não "3.1.x".
-            // A conta com o valor correto é a sintética "3.1.1 - RECEITA BRUTA" (is_synthetic=true),
-            // mas activeData filtra .filter(!is_synthetic) → nunca encontrava o valor → R$ 0,00.
-            // SOLUÇÃO: busca em 3 camadas de fallback sem depender de type === 'Credit':
-            receitaBruta: (() => {
-                // Camada 1: conta sintética com código 3.1.x (ex: "3.1.1 - RECEITA BRUTA")
-                const synth31 = accounts.filter(a =>
-                    a.is_synthetic &&
-                    a.account_code &&
-                    a.account_code.startsWith('3.1') &&
-                    Math.abs(a.final_balance) > 0
-                );
-                if (synth31.length > 0) {
-                    // Pega a de menor nível hierárquico (mais abrangente)
-                    const top = synth31.reduce((prev, cur) =>
-                        (prev.account_code?.split('.').length || 0) <= (cur.account_code?.split('.').length || 0) ? prev : cur
-                    );
-                    return [top];
+        // Fallback: reverse parsing
+        if (valuesPart.length === 0) {
+            cleanLine = cleanLine.replace(/\.{3,}/g, ' ');
+            const tokens = cleanLine.split(/\s+/);
+            const foundNumbers: number[] = [];
+            let lastTokenIndex = tokens.length - 1;
+            let numbersFoundCount = 0;
+            while (lastTokenIndex >= 0 && numbersFoundCount < 4) {
+                const token = tokens[lastTokenIndex];
+                if (/^[DC%]$/i.test(token)) {
+                    if (!rawIndicator && /^[DC]$/i.test(token)) rawIndicator = token.toUpperCase();
+                    lastTokenIndex--;
+                    continue;
                 }
-                // Camada 2: analíticas com código começando em 3
-                const byCode3 = activeData.filter(a =>
-                    a.account_code?.startsWith('3') && Math.abs(a.final_balance) > 0
-                );
-                if (byCode3.length > 0) return byCode3;
-                // Camada 3: fallback por nome (sem exigir type Credit)
-                return activeData.filter(a =>
-                    match(a, [], ['receita bruta', 'venda de', 'venda a', 'faturamento', 'serviços prestados']) &&
-                    Math.abs(a.final_balance) > 0
-                );
-            })(),
-            deducoes: activeData.filter(a => match(a, [], ['imposto sobre', 'devoluç', 'cancelamento', 'abatimento']) || (a.account_name.includes('Simples') && a.type === 'Debit')),
-            custos: activeData.filter(a => match(a, ['3.2', '3.3'], ['custo', 'cmv', 'cpv', 'csv'])),
-            despesasOp: activeData.filter(a => (a.account_code?.startsWith('3') || a.account_code?.startsWith('4')) && match(a, ['4'], ['despesa', 'salário', 'aluguel', 'energia', 'água', 'luz', 'telefone', 'honorários', 'pro labore']) && !match(a, [], ['custo', 'cmv', 'imposto sobre', 'financeir'])),
-            financeiro: activeData.filter(a => match(a, [], ['juros', 'financeira', 'bancária', 'iof', 'desconto', 'variação cambial']))
-        };
-
-        const dreTotals = {
-            receitaBruta: sum(dre.receitaBruta),
-            deducoes: sum(dre.deducoes),
-            custos: sum(dre.custos),
-            despesas: sum(dre.despesasOp),
-            financeiro: sum(dre.financeiro)
-        };
-
-        const recLiq = dreTotals.receitaBruta - dreTotals.deducoes;
-        const lucroBruto = recLiq - dreTotals.custos;
-        const resultadoOp = lucroBruto - dreTotals.despesas - dreTotals.financeiro;
-
-        return { balanco, bpTotals, dre, dreTotals, calculatedResult: resultadoOp };
-    }, [accounts]);
-
-    // --- ACTIONS ---
-
-    const handlePrint = () => window.print();
-
-    const handleShare = async () => {
-        const shareData = {
-            title: `Auditoria: ${headerData.companyName}`,
-            text: `Relatório de Análise Contábil - SP Assessoria.\nEmpresa: ${headerData.companyName}\nOperador: ${headerData.collaboratorName}\nData: ${formattedDate}\nResultado: ${formatCurrency(financialStructure.calculatedResult)}`,
-            url: window.location.href
-        };
-        try {
-            if (navigator.share) await navigator.share(shareData);
-            else { await navigator.clipboard.writeText(shareData.text); alert("Dados copiados para a área de transferência!"); }
-        } catch (err) { console.error(err); }
-    };
-
-    // Shared Header Logic for PDFs
-    const drawPDFHeader = (doc: jsPDF, pageWidth: number) => {
-        doc.setFillColor(15, 23, 42); // Primary Color
-        doc.rect(0, 0, pageWidth, 40, 'F');
-
-        doc.setTextColor(255, 255, 255);
-        doc.setFontSize(18);
-        doc.setFont("helvetica", "bold");
-        doc.text("SP ASSESSORIA CONTÁBIL", 14, 15);
-
-        doc.setFontSize(10);
-        doc.setFont("helvetica", "normal");
-        doc.text(`Relatório de Auditoria Digital`, 14, 22);
-
-        // Metadata Column 1
-        doc.text(`Cliente: ${headerData.companyName}`, 14, 30);
-        doc.text(`CNPJ: ${headerData.cnpj}`, 14, 35);
-
-        // Metadata Column 2 (Right Aligned context)
-        doc.text(`Emissão: ${formattedDate}`, 120, 30);
-        doc.text(`Operador: ${headerData.collaboratorName || 'Não Identificado'}`, 120, 35);
-    };
-
-    const handleExportPDF = () => {
-        const doc = new jsPDF();
-        const pageWidth = doc.internal.pageSize.width;
-
-        drawPDFHeader(doc, pageWidth);
-
-        let y = 50;
-
-        // Summary Section
-        doc.setTextColor(0, 0, 0);
-        doc.setFontSize(12);
-        doc.setFont("helvetica", "bold");
-        doc.text("Resumo Executivo do Resultado (D.R.E.)", 14, y);
-        y += 10;
-
-        // Explicit DRE Columns as requested
-        const tableBody: any[] = [];
-
-        const addSection = (title: string, items: ExtractedAccount[], total: number) => {
-            // Section Header
-            tableBody.push([{
-                content: title.toUpperCase(),
-                colSpan: 4,
-                styles: { fontStyle: 'bold', fillColor: [240, 240, 240], textColor: [0, 0, 0] }
-            }]);
-
-            // Items
-            items.forEach(acc => {
-                tableBody.push([
-                    acc.account_name,
-                    acc.debit_value > 0 ? formatCurrency(acc.debit_value) : '-',
-                    acc.credit_value > 0 ? formatCurrency(acc.credit_value) : '-',
-                    {
-                        content: formatCurrency(acc.final_balance),
-                        styles: { textColor: acc.final_balance < 0 ? [220, 50, 50] : [0, 0, 0] }
+                if (/^[\d.,\-()]+$/.test(token) && /\d/.test(token)) {
+                    foundNumbers.unshift(parseFinancialNumber(token));
+                    numbersFoundCount++;
+                    lastTokenIndex--;
+                } else {
+                    if (token.toUpperCase() === 'R$') { lastTokenIndex--; }
+                    else { break; }
+                }
+            }
+            if (foundNumbers.length > 0) {
+                valuesPart = foundNumbers;
+                const nameTokens = tokens.slice(0, lastTokenIndex + 1);
+                if (nameTokens.length > 0) {
+                    if (/^[\d.-]+$/.test(nameTokens[0])) {
+                        code = nameTokens[0];
+                        name = nameTokens.slice(1).join(' ');
+                    } else {
+                        name = nameTokens.join(' ');
                     }
-                ]);
-            });
+                }
+            }
+        }
 
-            // Section Total
-            tableBody.push([
-                { content: `Total ${title}`, colSpan: 3, styles: { fontStyle: 'bold', halign: 'right' } },
-                { content: formatCurrency(total), styles: { fontStyle: 'bold', fillColor: [245, 245, 245] } }
-            ]);
-        };
+        name = name.replace(/[.|]{2,}/g, '').trim();
+        if (!name || name.length < 2 || valuesPart.length === 0) return;
 
-        addSection('Receita Bruta', financialStructure.dre.receitaBruta, financialStructure.dreTotals.receitaBruta);
-        addSection('Deduções', financialStructure.dre.deducoes, -financialStructure.dreTotals.deducoes);
-        addSection('Custos (CMV)', financialStructure.dre.custos, -financialStructure.dreTotals.custos);
-        addSection('Despesas Operacionais', financialStructure.dre.despesasOp, -financialStructure.dreTotals.despesas);
-        addSection('Resultado Financeiro', financialStructure.dre.financeiro, -financialStructure.dreTotals.financeiro);
+        const lowerName = name.toLowerCase();
 
-        // Final Result Row
-        tableBody.push([
-            { content: 'RESULTADO LÍQUIDO DO EXERCÍCIO', colSpan: 3, styles: { fillColor: [15, 23, 42], textColor: [255, 255, 255], fontStyle: 'bold', halign: 'right', fontSize: 10 } },
-            { content: formatCurrency(financialStructure.calculatedResult), styles: { fillColor: [15, 23, 42], textColor: [255, 255, 255], fontStyle: 'bold', fontSize: 10 } }
-        ]);
+        // FIX: detecção de tipo Credit ampliada
+        if (code.startsWith('2') || code.startsWith('3') || code.startsWith('6') ||
+            lowerName.includes('passivo') || lowerName.includes('fornecedor') ||
+            lowerName.includes('receita') || lowerName.includes('patrimônio') ||
+            lowerName.includes('capital') || lowerName.includes('lucro') ||
+            lowerName.includes('venda') || lowerName.includes('faturamento') ||
+            lowerName.includes('serviços prestados')) {
+            type = 'Credit';
+        }
 
-        autoTable(doc, {
-            startY: y,
-            head: [['Conta / Descrição', 'Débito', 'Crédito', 'Lucro/Prejuízo']],
-            body: tableBody,
-            theme: 'grid',
-            headStyles: { fillColor: [37, 99, 235], halign: 'center' },
-            styles: { fontSize: 8, cellPadding: 2 },
-            columnStyles: {
-                0: { cellWidth: 'auto' },
-                1: { cellWidth: 30, halign: 'right' },
-                2: { cellWidth: 30, halign: 'right' },
-                3: { cellWidth: 35, halign: 'right', fontStyle: 'bold' }
-            },
-            didDrawPage: (data) => {
-                // Footer on every page
-                const pageSize = doc.internal.pageSize;
-                const pageHeight = pageSize.height ? pageSize.height : pageSize.getHeight();
-                doc.setFontSize(8);
-                doc.setTextColor(150);
-                doc.text(`Página ${data.pageNumber} - Gerado por SP Assessoria System`, 14, pageHeight - 10);
-                doc.text(`${formattedDate}`, pageWidth - 40, pageHeight - 10, { align: 'right' });
+        // FIX: indicador D/C do próprio balancete sobrescreve a detecção por nome
+        if (rawIndicator === 'D') type = 'Debit';
+        if (rawIndicator === 'C') type = 'Credit';
+
+        // Devoluções são sempre Debit
+        if (lowerName.includes('devoluc') || lowerName.includes('devolução') ||
+            lowerName.includes('cancelamento') || lowerName.includes('abatimento')) {
+            type = 'Debit';
+        }
+
+        if (docType === 'DRE') {
+            if (lowerName.includes('custo') || lowerName.includes('despesa') ||
+                lowerName.includes('imposto') || lowerName.includes('cmv')) {
+                type = 'Debit';
+            }
+        }
+
+        const values = mapValuesToColumns(valuesPart, docType);
+        const cleanCode = code.endsWith('.') ? code.slice(0, -1) : code;
+
+        let category = null;
+        if (docType === 'DRE' || code.startsWith('3') || code.startsWith('4') || code.startsWith('5')) {
+            if (lowerName.includes('receita') || lowerName.includes('custo') || lowerName.includes('despesa') || code.startsWith('3') || code.startsWith('4')) category = 'Operacional';
+            else if (lowerName.includes('invest') || lowerName.includes('imobiliz')) category = 'Investimento';
+            else if (lowerName.includes('juro') || lowerName.includes('financ')) category = 'Financiamento';
+            else category = 'Operacional';
+        }
+
+        let finalBal = values.final;
+
+        if (docType === 'DRE') {
+            if (values.debit === 0 && values.credit === 0) {
+                if (type === 'Debit') values.debit = Math.abs(finalBal);
+                else values.credit = Math.abs(finalBal);
+            }
+            if (type === 'Debit') finalBal = -Math.abs(finalBal);
+            else finalBal = Math.abs(finalBal);
+        } else {
+            // FIX: se SDO_ATUAL for 0 mas CRÉDITO tiver valor (caso das contas de receita no balancete),
+            // usa o crédito como valor final — isso resolve a Receita Bruta zerada
+            if (finalBal === 0 && values.credit > 0 && type === 'Credit') {
+                finalBal = values.credit;
+            } else if (finalBal === 0 && (values.debit !== 0 || values.credit !== 0)) {
+                finalBal = values.debit - values.credit;
+            }
+        }
+
+        const possibleInversion = checkInversion(name, type, finalBal, rawIndicator, cleanCode);
+
+        accounts.push({
+            account_code: cleanCode,
+            account_name: name,
+            initial_balance: values.initial,
+            debit_value: values.debit,
+            credit_value: values.credit,
+            final_balance: finalBal,
+            total_value: Math.abs(finalBal),
+            type,
+            possible_inversion: possibleInversion,
+            ifrs18_category: category as any,
+            level: 1,
+            is_synthetic: false
+        });
+    });
+
+    // Post-processing hierarchy
+    accounts.sort((a, b) => {
+        if (!a.account_code) return 1;
+        if (!b.account_code) return -1;
+        return a.account_code.localeCompare(b.account_code, undefined, { numeric: true, sensitivity: 'base' });
+    });
+
+    accounts.forEach((acc, idx) => {
+        if (acc.account_code) {
+            acc.level = acc.account_code.split(/[.-]/).filter(x => x.length > 0).length;
+            const myCode = acc.account_code;
+            const nextAcc = accounts[idx + 1];
+            let isParent = false;
+            if (nextAcc && nextAcc.account_code && nextAcc.account_code.startsWith(myCode)) {
+                const charAfter = nextAcc.account_code[myCode.length];
+                if (charAfter === '.' || charAfter === '-' || charAfter === undefined) isParent = true;
+            }
+            acc.is_synthetic = isParent;
+        } else if (
+            acc.account_name.toLowerCase().startsWith('total') ||
+            acc.account_name.toLowerCase().startsWith('grupo') ||
+            acc.account_name.toLowerCase().startsWith('resultado')
+        ) {
+            acc.is_synthetic = true;
+        }
+    });
+
+    const analyticalAccounts = accounts.filter(a => !a.is_synthetic);
+    const calcAccounts = analyticalAccounts.length > 0
+        ? analyticalAccounts
+        : accounts.filter(a => !a.account_name.toLowerCase().includes('total'));
+
+    const total_debits = calcAccounts.reduce((sum, a) => sum + Math.abs(a.debit_value), 0);
+    const total_credits = calcAccounts.reduce((sum, a) => sum + Math.abs(a.credit_value), 0);
+    const discrepancy = Math.abs(total_debits - total_credits);
+
+    let calculatedResult = 0;
+    let resultLabel = 'Resultado do Período';
+
+    if (docType === 'DRE') {
+        const revenue = analyticalAccounts.filter(a => a.type === 'Credit').reduce((sum, a) => sum + Math.abs(a.final_balance), 0);
+        const expenses = analyticalAccounts.filter(a => a.type === 'Debit').reduce((sum, a) => sum + Math.abs(a.final_balance), 0);
+        calculatedResult = revenue - expenses;
+        resultLabel = calculatedResult >= 0 ? 'Lucro Líquido Apurado' : 'Prejuízo Líquido Apurado';
+    } else {
+        let revenueSum = 0, expenseSum = 0;
+        analyticalAccounts.forEach(acc => {
+            if (acc.account_code) {
+                const firstChar = acc.account_code.charAt(0);
+                if (['3', '4', '5', '6', '7'].includes(firstChar)) {
+                    if (acc.type === 'Credit') revenueSum += Math.abs(acc.final_balance);
+                    if (acc.type === 'Debit') expenseSum += Math.abs(acc.final_balance);
+                }
+            } else {
+                const lower = acc.account_name.toLowerCase();
+                if ((lower.includes('receita') || lower.includes('faturamento') || lower.includes('venda')) && acc.type === 'Credit') {
+                    revenueSum += Math.abs(acc.final_balance);
+                }
+                if ((lower.includes('despesa') || lower.includes('custo')) && acc.type === 'Debit') {
+                    expenseSum += Math.abs(acc.final_balance);
+                }
             }
         });
-
-        doc.save(`DRE_${headerData.companyName}_${new Date().toISOString().split('T')[0]}.pdf`);
-    };
-
-    const handleExportOpinionPDF = () => {
-        const currentOpinion = opinions[activeOpinionTab];
-        if (!currentOpinion) {
-            alert("O parecer ainda não foi gerado. Aguarde a conclusão da análise da IA.");
-            return;
-        }
-
-        const doc = new jsPDF();
-        const pageWidth = doc.internal.pageSize.width;
-        const pageHeight = doc.internal.pageSize.height;
-        const marginX = 14;
-        const marginBottom = 20; // Space for footer
-
-        // Helper for Footer
-        const drawFooter = (pageNum: number, totalPages: number) => {
-            doc.setFontSize(8);
-            doc.setTextColor(150);
-            doc.text(`Página ${pageNum} de ${totalPages} - Gerado por SP Assessoria System`, marginX, pageHeight - 10);
-            doc.text(`${formattedDate}`, pageWidth - marginX, pageHeight - 10, { align: 'right' });
-        };
-
-        // Page 1 Setup
-        drawPDFHeader(doc, pageWidth);
-
-        let y = 50;
-
-        // Title based on active tab
-        const titles: Record<string, string> = {
-            'financial': 'Parecer de Saúde Financeira e Contábil',
-            'costs': 'Análise de Custos e CMV (IFRS)',
-            'compliance': 'Auditoria Fiscal e Compliance SPED'
-        };
-
-        doc.setTextColor(0, 0, 0);
-        doc.setFontSize(14);
-        doc.setFont("helvetica", "bold");
-        doc.text(titles[activeOpinionTab] || 'Parecer Contábil', marginX, y);
-
-        y += 10;
-
-        // Content Text Processing
-        doc.setFontSize(10);
-        doc.setFont("helvetica", "normal");
-        doc.setTextColor(20);
-
-        // Split text into lines that fit the width
-        const splitText = doc.splitTextToSize(currentOpinion, pageWidth - (marginX * 2));
-        const lineHeight = 6;
-
-        // Loop through lines to handle pagination
-        for (let i = 0; i < splitText.length; i++) {
-            // Check if we reached the bottom margin
-            if (y > pageHeight - marginBottom) {
-                doc.addPage();
-                drawPDFHeader(doc, pageWidth); // Re-draw header on new pages
-                y = 50; // Reset Y position
+        calculatedResult = revenueSum - expenseSum;
+        if (Math.abs(calculatedResult) < 0.01) {
+            const resultAccount = analyticalAccounts.find(a =>
+                /lucro\s+l[ií]quido|preju[ií]zo\s+l[ií]quido/i.test(a.account_name)
+            );
+            if (resultAccount) {
+                calculatedResult = resultAccount.final_balance;
+                resultLabel = resultAccount.account_name;
             }
-            doc.text(splitText[i], marginX, y);
-            y += lineHeight;
+        }
+    }
+
+    return {
+        summary: {
+            document_type: docType as any,
+            period: 'A definir',
+            total_debits,
+            total_credits,
+            is_balanced: docType === 'DRE' ? true : discrepancy < 1.0,
+            discrepancy_amount: discrepancy,
+            observations: [],
+            specific_result_value: calculatedResult,
+            specific_result_label: resultLabel
+        },
+        accounts,
+        spell_check: []
+    };
+}
+
+async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: string): Promise<{ lines: string[], docType: string }> {
+    const safetySettings = [
+        { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
+        { category: HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, threshold: HarmBlockThreshold.BLOCK_NONE },
+        { category: HarmCategory.HARM_CATEGORY_HARASSMENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+        { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
+    ];
+
+    // FIX PRINCIPAL: prompt reescrito para extrair TODAS as 4 colunas do balancete
+    // ANTES: extraía só SDO_ATUAL → receitas com SDO_ATUAL=0 desapareciam
+    // DEPOIS: extrai SDO_ANT | DÉBITO | CRÉDITO | SDO_ATUAL → captura receitas pelo CRÉDITO
+    const basePrompt = `
+    TASK: Extract ALL financial data from this Brazilian accounting document (Balancete/DRE/Balanço Patrimonial).
+
+    OUTPUT FORMAT — one row per account:
+    CODE | ACCOUNT NAME | SDO_ANTERIOR | DEBITO | CREDITO | SDO_ATUAL
+
+    CRITICAL RULES:
+    1. EXTRACT EVERY SINGLE ROW from ALL pages. Never skip any account, even if values are zero.
+    2. USE PIPE (|) to separate all 6 fields exactly as shown above.
+    3. FOR BALANCETE (4 numeric columns): map them in order → SDO_ANTERIOR | DEBITO | CREDITO | SDO_ATUAL.
+       - IMPORTANT: accounts in groups 3, 4, 5 (Receitas/Custos/Despesas) often have SDO_ATUAL = 0,00
+         but have large values in DEBITO or CREDITO columns. ALWAYS extract all 4 columns.
+       - Example: "3.1.1 | RECEITA BRUTA | 0,00 | 0,00 | 86.898.954,21 | 86.898.954,21 C"
+       - Example: "(0000000502) 0002 | VENDA DE MERCADORIAS A PRAZO | 0,00 | 0,00 | 86.650.198,27 | 86.650.198,27 C"
+    4. FOR DRE (1-2 numeric columns): put 0,00 in missing fields.
+    5. KEEP ORIGINAL NUMBER FORMAT exactly (e.g. 1.000,00 not 1000.00). Keep D/C suffix.
+    6. INCLUDE synthetic/group accounts (e.g. "1 - ATIVO", "1.1 - ATIVO CIRCULANTE", "3.1.1 - RECEITA BRUTA").
+    7. IGNORE only page headers, footers, column headers, and CNPJ/date lines.
+    8. DO NOT summarize, skip, or merge rows.
+    `;
+
+    try {
+        let extractedText = "";
+        let docType = 'Balancete';
+
+        if (mimeType === 'text/csv' || mimeType === 'text/plain' || mimeType === 'application/csv') {
+            const decodedText = safeDecodeBase64(fileBase64);
+            const allLines = decodedText.split('\n');
+            const CHUNK_SIZE = 600;
+            const chunks: string[] = [];
+            for (let i = 0; i < allLines.length; i += CHUNK_SIZE) {
+                chunks.push(allLines.slice(i, i + CHUNK_SIZE).join('\n'));
+            }
+            for (let i = 0; i < chunks.length; i++) {
+                const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+                    model: 'gemini-2.0-flash',
+                    contents: { parts: [{ text: basePrompt + `\n\n--- SEGMENT ${i + 1} OF ${chunks.length} ---\n${chunks[i]}\n--- END SEGMENT ---` }] },
+                    config: { temperature: 0.0, maxOutputTokens: 8192, safetySettings }
+                }));
+                if (response.text) extractedText += response.text + "\n";
+            }
+        } else if (mimeType === 'application/pdf') {
+            console.log("Sending PDF directly to Gemini for extraction...");
+            const sanitizedPdf = sanitizeBase64(fileBase64);
+            const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+                model: 'gemini-2.0-flash',
+                contents: {
+                    parts: [
+                        { inlineData: { mimeType: 'application/pdf', data: sanitizedPdf } },
+                        { text: basePrompt + "\n\nEXTRACT EVERY SINGLE ROW FROM ALL PAGES. Pay special attention to revenue accounts (groups 3.x) which may show 0,00 in SDO_ATUAL but have values in CREDITO column." }
+                    ]
+                },
+                config: { temperature: 0.0, maxOutputTokens: 65000, safetySettings }
+            }));
+            if (response.text) extractedText = response.text;
+        } else {
+            const sanitizedData = sanitizeBase64(fileBase64);
+            const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+                model: 'gemini-2.0-flash',
+                contents: {
+                    parts: [
+                        { inlineData: { mimeType: mimeType, data: sanitizedData } },
+                        { text: basePrompt + "\n\nEXTRACT EVERYTHING." }
+                    ]
+                },
+                config: { temperature: 0.1, maxOutputTokens: 65000, safetySettings }
+            }));
+            extractedText = response.text || "";
         }
 
-        // Apply Footers to ALL pages
-        const totalPages = doc.getNumberOfPages();
-        for (let i = 1; i <= totalPages; i++) {
-            doc.setPage(i);
-            drawFooter(i, totalPages);
+        let lines = extractedText.split('\n').filter(l => l.trim().length > 0);
+
+        const docTypeLine = lines.find(l => /Balanço|Balancete|Demonstração|Resultado/i.test(l));
+        if (docTypeLine) {
+            if (/Resultado|DRE/i.test(docTypeLine)) docType = 'DRE';
+            else if (/Balanço/i.test(docTypeLine)) docType = 'Balanço Patrimonial';
         }
 
-        doc.save(`Parecer_${activeOpinionTab}_${headerData.companyName}.pdf`);
-    };
+        lines = lines.filter(l => !l.startsWith('DOCTYPE') && /\d/.test(l));
 
-    // --- OPINIONS FETCH ---
-    const fetchOpinion = async (type: 'financial' | 'costs' | 'compliance', force = false) => {
-        if (!force && (opinions[type] || loadingOpinions[type])) return;
-        setLoadingOpinions(prev => ({ ...prev, [type]: true }));
-        try {
-            let res = '';
-            if (type === 'financial') res = await generateFinancialInsight(result, "Parecer financeiro completo.", 5);
-            else if (type === 'costs') res = await generateCMVAnalysis(result, "IFRS");
-            else res = await generateSpedComplianceCheck(result);
-            setOpinions(prev => ({ ...prev, [type]: res }));
-        } catch (e) { console.error(e); }
-        finally { setLoadingOpinions(prev => ({ ...prev, [type]: false })); }
-    };
+        console.log("Raw Extracted Lines Preview:", lines.slice(0, 10));
 
-    useEffect(() => {
-        // Reset and Auto-fetch all opinions on NEW result
-        setOpinions({ financial: '', costs: '', compliance: '' });
-        fetchOpinion('financial', true);
-        fetchOpinion('costs', true);
-        fetchOpinion('compliance', true);
-    }, [result]);
+        return { lines, docType };
 
-    const handleAccountClick = (name: string) => {
-        const query = encodeURIComponent(`O que é a conta contábil "${name}" e como deve ser seu lançamento correto?`);
-        // Gemini Search Link is better for "exemplificar e sugerir correção"
-        window.open(`https://www.google.com/search?q=${query}`, '_blank');
-    };
+    } catch (e: any) {
+        console.error("Extraction Error:", e);
+        throw new Error(`Erro na extração: ${e.message}`);
+    }
+}
 
-    const renderAccountName = (account: ExtractedAccount) => {
-        const correction = findCorrection(account.account_name);
-        const isInverted = account.possible_inversion;
-        const hasSuggestion = account.name_suggestion || account.audit_notes;
+async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, sampleAccounts: { code: string, name: string }[]): Promise<{
+    observations: string[], spellcheck: any[], period: string, account_audits?: any[]
+}> {
+    const prompt = `
+    ATUE COMO: Auditor Contábil Senior SP Assessoria.
+    DADOS: Doc: ${summaryData.document_type}, Resultado: ${summaryData.specific_result_value}.
+    AMOSTRA CONTAS (Código | Nome): ${sampleAccounts.map(a => `${a.code} | ${a.name}`).join('; ')}
+    
+    TAREFA: 
+    1. Identifique o período (ex: 01/2025 ou 2024 completo).
+    2. Identifique erros ortográficos ou nomenclaturas contábeis fora do padrão.
+    3. Sinalize contas com nomes genéricos ou confusos e sugira a melhor opção técnica.
+    
+    SAÍDA JSON RIGOROSA:
+    {
+      "period": "string",
+      "observations": ["string"],
+      "spellcheck": [{"original_term": "string", "suggested_correction": "string", "confidence": "High"}],
+      "account_audits": [{"code": "string", "name": "string", "name_suggestion": "string", "posting_suggestion": "string", "audit_notes": "string"}]
+    }
+    `;
+    try {
+        const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+            model: 'gemini-2.0-flash',
+            contents: { parts: [{ text: prompt }] },
+            config: { responseMimeType: "application/json", temperature: 0.2 }
+        }));
+        const parsed = JSON.parse(response.text || '{}');
+        return {
+            period: parsed.period || "A definir",
+            observations: parsed.observations || [],
+            spellcheck: parsed.spellcheck || [],
+            account_audits: parsed.account_audits || []
+        };
+    } catch (e) {
+        return { observations: [], spellcheck: [], period: "Indefinido", account_audits: [] };
+    }
+}
 
-        return (
-            <div className="flex flex-col">
-                <div className="flex items-center gap-2 flex-wrap">
-                    {isInverted && (
-                        <span title="Possível inversão de natureza (Débito/Crédito)" className="text-amber-500 cursor-help">⚠️</span>
-                    )}
-                    <button
-                        onClick={() => handleAccountClick(account.account_name)}
-                        className={`text-left hover:underline decoration-blue-400 group flex items-center gap-1 ${correction ? "line-through opacity-50 decoration-red-500" : "font-medium text-slate-700 dark:text-slate-300"}`}
-                        title="Ver explicação e exemplos sobre esta conta"
-                    >
-                        {account.account_name}
-                        <svg className="w-3 h-3 opacity-0 group-hover:opacity-100 text-blue-500 transition-opacity" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                        </svg>
-                    </button>
-                    {correction && (
-                        <span className="text-[10px] text-amber-600 bg-amber-50 px-1 border border-amber-200 rounded">
-                            {correction.suggested_correction}
-                        </span>
-                    )}
-                </div>
-                {account.account_code && <span className="text-[10px] text-slate-400 font-mono mt-0.5">{account.account_code}</span>}
-
-                {/* AI Suggestions / Audit Notes */}
-                {hasSuggestion && (
-                    <div className="mt-1 p-1 bg-blue-50 dark:bg-blue-900/10 border-l-2 border-blue-400 text-[10px] text-blue-700 dark:text-blue-300">
-                        {account.name_suggestion && <p><strong>Sugestão:</strong> {account.name_suggestion}</p>}
-                        {account.posting_suggestion && <p><strong>Lançamento:</strong> {account.posting_suggestion}</p>}
-                        {account.audit_notes && <p className="italic opacity-80">{account.audit_notes}</p>}
-                    </div>
-                )}
-            </div>
-        );
-    };
-
-    const filteredAccounts = useMemo(() => {
-        if (!accounts) return [];
-        if (!searchTerm) return accounts;
-        const s = searchTerm.toLowerCase();
-        return accounts.filter(a => a.account_name.toLowerCase().includes(s) || (a.account_code && a.account_code.toLowerCase().includes(s)));
-    }, [accounts, searchTerm]);
-
-    // --- RENDERERS ---
-
-    const findCorrection = (name: string) => {
-        if (!spell_check || spell_check.length === 0) return null;
-        return spell_check.find(s => name.toLowerCase().includes(s.original_term.toLowerCase()));
-    };
-
-    // Improved DRE Row Renderer
-    const renderDRERow = (account: ExtractedAccount) => {
-        const correction = findCorrection(account.account_name);
-        // Visual Alert for Inversions
-        const isInverted = account.possible_inversion;
-
-        return (
-            <tr key={account.account_code || Math.random()} className={`text-xs border-b dark:border-slate-800 transition-colors ${isInverted ? 'bg-amber-50 hover:bg-amber-100 dark:bg-amber-900/20 border-l-4 border-l-amber-500' : 'hover:bg-slate-50 dark:hover:bg-slate-800'}`}>
-                <td className="pl-4 pr-2 py-3">
-                    {renderAccountName(account)}
-                </td>
-                <td className="px-2 py-3 text-right font-mono text-slate-500 border-r dark:border-slate-700">
-                    {account.debit_value > 0 ? formatCurrency(account.debit_value) : '-'}
-                </td>
-                <td className="px-2 py-3 text-right font-mono text-slate-500 border-r dark:border-slate-700">
-                    {account.credit_value > 0 ? formatCurrency(account.credit_value) : '-'}
-                </td>
-                <td className={`px-4 py-3 text-right font-mono font-bold ${account.final_balance < 0 ? 'text-red-600' : 'text-emerald-600'}`}>
-                    {formatCurrency(account.final_balance)}
-                </td>
-            </tr>
-        );
-    };
-
-    return (
-        <div className="space-y-6 animate-fadeIn pb-20">
-
-            {/* HEADER ACTIONS (Global for All Tabs) */}
-            <div className="bg-white dark:bg-slate-800 p-6 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 flex flex-col md:flex-row justify-between items-center gap-4">
-                <div>
-                    <h2 className="text-2xl font-black text-slate-800 dark:text-white">{headerData.companyName}</h2>
-                    <div className="flex gap-3 text-sm text-slate-500 flex-wrap">
-                        <span className="font-mono">{headerData.cnpj}</span>
-                        <span>•</span>
-                        <span>Operador: <strong>{headerData.collaboratorName}</strong></span>
-                        <span>•</span>
-                        <span>{formattedDate}</span>
-                    </div>
-                </div>
-                {/* GLOBAL FUNCTIONAL BUTTONS */}
-                <div className="flex gap-2 print:hidden">
-                    <button onClick={handlePrint} className="flex items-center gap-2 px-4 py-2 bg-slate-100 dark:bg-slate-700 rounded-lg font-bold text-xs hover:bg-slate-200 text-slate-700 dark:text-white transition-colors">
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" /></svg>
-                        Imprimir
-                    </button>
-                    <button onClick={handleShare} className="flex items-center gap-2 px-4 py-2 bg-slate-100 dark:bg-slate-700 rounded-lg font-bold text-xs hover:bg-slate-200 text-slate-700 dark:text-white transition-colors">
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" /></svg>
-                        Compartilhar
-                    </button>
-                    <button onClick={handleExportPDF} className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white rounded-lg font-bold text-xs hover:bg-blue-700 shadow-lg shadow-blue-500/20 transition-transform active:scale-95">
-                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-                        Exportar PDF
-                    </button>
-                </div>
-            </div>
-
-            {/* TABS NAVIGATION */}
-            <div className="flex overflow-x-auto gap-2 pb-2 print:hidden">
-                {[
-                    { id: 'dashboard', label: '📊 Resumo', desc: 'Visão Geral' },
-                    { id: 'charts', label: '📈 Gráficos', desc: 'Análise Visual' },
-                    { id: 'dre', label: '📉 D.R.E.', desc: 'Resultado (4 Colunas)' },
-                    { id: 'bp', label: '⚖️ Balanço', desc: 'Patrimonial' },
-                    { id: 'list', label: '📑 Razão', desc: 'Lista Completa' },
-                ].map(tab => (
-                    <button
-                        key={tab.id}
-                        onClick={() => setViewTab(tab.id as any)}
-                        className={`flex-1 min-w-[140px] p-4 rounded-xl border text-left transition-all ${viewTab === tab.id
-                            ? 'bg-blue-600 border-blue-600 text-white shadow-lg shadow-blue-500/30'
-                            : 'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-500 hover:bg-slate-50 dark:hover:bg-slate-700'
-                            }`}
-                    >
-                        <span className="block font-black text-sm uppercase tracking-wide">{tab.label}</span>
-                        <span className={`text-xs ${viewTab === tab.id ? 'text-blue-100' : 'text-slate-400'}`}>{tab.desc}</span>
-                    </button>
-                ))}
-            </div>
-
-            {/* === DASHBOARD TAB === */}
-            {viewTab === 'dashboard' && (
-                <div className="space-y-6 animate-fadeIn">
-                    <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                        <div className="p-5 bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700">
-                            <p className="text-xs font-bold text-slate-400 uppercase">Receita Bruta Est.</p>
-                            <p className="text-xl font-black text-blue-600 mt-1">{formatCurrency(financialStructure.dreTotals.receitaBruta)}</p>
-                        </div>
-                        <div className="p-5 bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700">
-                            <p className="text-xs font-bold text-slate-400 uppercase">Total Ativo</p>
-                            <p className="text-xl font-black text-slate-800 dark:text-white mt-1">{formatCurrency(financialStructure.bpTotals.ac + financialStructure.bpTotals.anc)}</p>
-                        </div>
-                        <div className="p-5 bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-100 dark:border-slate-700">
-                            <p className="text-xs font-bold text-slate-400 uppercase">Patrimônio Líquido</p>
-                            <p className="text-xl font-black text-emerald-600 mt-1">{formatCurrency(financialStructure.bpTotals.pl)}</p>
-                        </div>
-                        {/* RESULTADO EVIDENCIADO */}
-                        <div className={`p-5 rounded-2xl shadow-md border-2 transform transition-transform hover:scale-105 ${financialStructure.calculatedResult >= 0 ? 'bg-gradient-to-br from-green-50 to-white border-green-200 dark:from-green-900/40 dark:to-slate-800 dark:border-green-800' : 'bg-gradient-to-br from-red-50 to-white border-red-200 dark:from-red-900/40 dark:to-slate-800 dark:border-red-800'}`}>
-                            <p className={`text-xs font-bold uppercase flex items-center gap-1 ${financialStructure.calculatedResult >= 0 ? 'text-green-700' : 'text-red-600'}`}>
-                                {financialStructure.calculatedResult >= 0 ? '📈 Lucro do Período' : '📉 Prejuízo do Período'}
-                            </p>
-                            <p className={`text-2xl font-black mt-1 ${financialStructure.calculatedResult >= 0 ? 'text-green-700' : 'text-red-600'}`}>
-                                {formatCurrency(financialStructure.calculatedResult)}
-                            </p>
-                        </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                        {/* OPINION SECTION */}
-                        <div className="lg:col-span-2 bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden flex flex-col">
-                            <div className="flex flex-col md:flex-row border-b dark:border-slate-700">
-                                <div className="flex-1 flex">
-                                    <button onClick={() => setActiveOpinionTab('financial')} className={`flex-1 p-4 text-xs font-bold uppercase ${activeOpinionTab === 'financial' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'text-slate-400'}`}>Saúde Financeira</button>
-                                    <button onClick={() => setActiveOpinionTab('costs')} className={`flex-1 p-4 text-xs font-bold uppercase ${activeOpinionTab === 'costs' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'text-slate-400'}`}>Custos (CMV)</button>
-                                    <button onClick={() => setActiveOpinionTab('compliance')} className={`flex-1 p-4 text-xs font-bold uppercase ${activeOpinionTab === 'compliance' ? 'text-blue-600 border-b-2 border-blue-600 bg-blue-50 dark:bg-blue-900/20' : 'text-slate-400'}`}>Fiscal/SPED</button>
-                                </div>
-                                <div className="p-2 flex items-center justify-end border-l border-slate-100 dark:border-slate-700">
-                                    <button
-                                        onClick={handleExportOpinionPDF}
-                                        className="flex items-center gap-2 px-3 py-1.5 bg-slate-100 dark:bg-slate-700 text-slate-600 dark:text-slate-300 rounded text-[10px] font-bold hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
-                                        title="Baixar este parecer em PDF para enviar ao cliente"
-                                    >
-                                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" /></svg>
-                                        Exportar Parecer
-                                    </button>
-                                </div>
-                            </div>
-                            <div className="p-6 min-h-[200px]">
-                                {loadingOpinions[activeOpinionTab] ? (
-                                    <div className="flex flex-col items-center justify-center h-full space-y-3">
-                                        <div className="animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-blue-600"></div>
-                                        <p className="text-xs text-slate-400 animate-pulse">Gerando análise com IA...</p>
-                                    </div>
-                                ) : (
-                                    <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-300 whitespace-pre-wrap">
-                                        {opinions[activeOpinionTab]}
-                                    </p>
-                                )}
-                            </div>
-                        </div>
-
-                        {/* CHART */}
-                        <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 p-4">
-                            <h3 className="text-xs font-bold text-slate-500 uppercase mb-4 text-center">Estrutura Patrimonial</h3>
-                            <div className="h-[250px]">
-                                <ResponsiveContainer width="100%" height="100%">
-                                    <BarChart data={[
-                                        { name: 'Ativo', Circulante: financialStructure.bpTotals.ac, Fixo: financialStructure.bpTotals.anc },
-                                        { name: 'Passivo', Circulante: financialStructure.bpTotals.pc, Fixo: financialStructure.bpTotals.pnc + financialStructure.bpTotals.pl }
-                                    ]}>
-                                        <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                                        <XAxis dataKey="name" tick={{ fontSize: 10 }} />
-                                        <YAxis hide />
-                                        <Tooltip formatter={(val: number) => formatCurrency(val)} />
-                                        <Legend />
-                                        <Bar dataKey="Circulante" stackId="a" fill="#3b82f6" barSize={40} />
-                                        <Bar dataKey="Fixo" stackId="a" fill="#1e40af" barSize={40} />
-                                    </BarChart>
-                                </ResponsiveContainer>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* === CHARTS DASHBOARD (NOVA PÁGINA INTERATIVA) === */}
-            {viewTab === 'charts' && (
-                <VisualDashboard result={result} />
-            )}
-
-            {/* === DRE TAB (UPDATED LAYOUT WITH 4 COLUMNS) === */}
-            {viewTab === 'dre' && (
-                <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden animate-fadeIn">
-
-                    {/* DRE Specific Toolbar */}
-                    <div className="bg-slate-50 dark:bg-slate-900/50 p-4 border-b dark:border-slate-700 flex flex-col md:flex-row justify-between items-center gap-4">
-                        <h3 className="font-bold text-slate-800 dark:text-white flex items-center gap-2">
-                            D.R.E.
-                            <span className="text-[10px] bg-blue-100 text-blue-700 px-2 py-0.5 rounded-full uppercase">Visualização Detalhada (4 Colunas)</span>
-                        </h3>
-                    </div>
-
-                    {/* DRE TABLE */}
-                    <div className="overflow-x-auto">
-                        <table className="w-full text-sm">
-                            <thead className="bg-slate-100 dark:bg-slate-900 text-slate-600 dark:text-slate-400 text-xs uppercase font-bold sticky top-0 z-10">
-                                <tr>
-                                    <th className="px-4 py-3 text-left w-1/2">Conta / Descrição</th>
-                                    <th className="px-2 py-3 text-right bg-slate-200/50 dark:bg-slate-800">Débito</th>
-                                    <th className="px-2 py-3 text-right bg-slate-200/50 dark:bg-slate-800">Crédito</th>
-                                    <th className="px-4 py-3 text-right">Lucro/Prejuízo (Saldo)</th>
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y dark:divide-slate-700">
-                                {/* Receitas */}
-                                <tr className="bg-slate-50 dark:bg-slate-900/30 font-bold text-blue-700 dark:text-blue-400">
-                                    <td className="px-4 py-2" colSpan={3}>1. RECEITA OPERACIONAL BRUTA</td>
-                                    <td className="px-4 py-2 text-right">{formatCurrency(financialStructure.dreTotals.receitaBruta)}</td>
-                                </tr>
-                                {financialStructure.dre.receitaBruta.map(a => renderDRERow(a))}
-
-                                {/* Deduções */}
-                                <tr className="bg-slate-50 dark:bg-slate-900/30 font-bold text-slate-600 dark:text-slate-400">
-                                    <td className="px-4 py-2" colSpan={3}>2. (-) DEDUÇÕES DA RECEITA</td>
-                                    <td className="px-4 py-2 text-right text-red-500">({formatCurrency(financialStructure.dreTotals.deducoes)})</td>
-                                </tr>
-                                {financialStructure.dre.deducoes.map(a => renderDRERow(a))}
-
-                                {/* Receita Líquida */}
-                                <tr className="bg-blue-50 dark:bg-blue-900/20 font-black text-slate-800 dark:text-white border-t border-b border-blue-100 dark:border-blue-900">
-                                    <td className="px-4 py-3 text-right uppercase" colSpan={3}>(=) Receita Líquida</td>
-                                    <td className="px-4 py-3 text-right">{formatCurrency(financialStructure.dreTotals.receitaBruta - financialStructure.dreTotals.deducoes)}</td>
-                                </tr>
-
-                                {/* Custos */}
-                                <tr className="bg-slate-50 dark:bg-slate-900/30 font-bold text-slate-600 dark:text-slate-400">
-                                    <td className="px-4 py-2" colSpan={3}>3. (-) CUSTOS (CMV/CPV/CSP)</td>
-                                    <td className="px-4 py-2 text-right text-red-500">({formatCurrency(financialStructure.dreTotals.custos)})</td>
-                                </tr>
-                                {financialStructure.dre.custos.map(a => renderDRERow(a))}
-
-                                {/* Lucro Bruto */}
-                                <tr className="bg-emerald-50 dark:bg-emerald-900/20 font-black text-emerald-800 dark:text-emerald-300 border-t border-b border-emerald-100 dark:border-emerald-900">
-                                    <td className="px-4 py-3 text-right uppercase" colSpan={3}>(=) Lucro Bruto</td>
-                                    <td className="px-4 py-3 text-right">{formatCurrency(financialStructure.dreTotals.receitaBruta - financialStructure.dreTotals.deducoes - financialStructure.dreTotals.custos)}</td>
-                                </tr>
-
-                                {/* Despesas */}
-                                <tr className="bg-slate-50 dark:bg-slate-900/30 font-bold text-slate-600 dark:text-slate-400">
-                                    <td className="px-4 py-2" colSpan={3}>4. (-) DESPESAS OPERACIONAIS</td>
-                                    <td className="px-4 py-2 text-right text-red-500">({formatCurrency(financialStructure.dreTotals.despesas)})</td>
-                                </tr>
-                                {financialStructure.dre.despesasOp.map(a => renderDRERow(a))}
-
-                                {/* Financeiro */}
-                                <tr className="bg-slate-50 dark:bg-slate-900/30 font-bold text-slate-600 dark:text-slate-400">
-                                    <td className="px-4 py-2" colSpan={3}>5. (-) RESULTADO FINANCEIRO</td>
-                                    <td className="px-4 py-2 text-right text-red-500">({formatCurrency(financialStructure.dreTotals.financeiro)})</td>
-                                </tr>
-                                {financialStructure.dre.financeiro.map(a => renderDRERow(a))}
-
-                                {/* Resultado Final - EVIDENCIADO */}
-                                <tr className={`text-lg font-black border-t-4 border-slate-900 ${financialStructure.calculatedResult >= 0 ? 'bg-green-100 dark:bg-green-900 text-green-900 dark:text-white' : 'bg-red-100 dark:bg-red-900 text-red-900 dark:text-white'}`}>
-                                    <td className="px-4 py-5 text-right uppercase tracking-wider" colSpan={3}>
-                                        {financialStructure.calculatedResult >= 0 ? '(=) LUCRO LÍQUIDO DO PERÍODO' : '(=) PREJUÍZO LÍQUIDO DO PERÍODO'}
-                                    </td>
-                                    <td className="px-4 py-5 text-right">{formatCurrency(financialStructure.calculatedResult)}</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            )}
-
-            {/* === BALANÇO TAB === */}
-            {viewTab === 'bp' && (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-fadeIn">
-                    {/* ATIVO */}
-                    <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden">
-                        <div className="bg-blue-600 p-4 text-white font-bold flex justify-between">
-                            <span>ATIVO</span>
-                            <span>{formatCurrency(financialStructure.bpTotals.ac + financialStructure.bpTotals.anc)}</span>
-                        </div>
-                        <div className="p-4 space-y-4">
-                            <div>
-                                <div className="flex justify-between font-bold text-slate-700 dark:text-slate-300 border-b dark:border-slate-600 pb-2 mb-2">
-                                    <span>Circulante</span>
-                                    <span>{formatCurrency(financialStructure.bpTotals.ac)}</span>
-                                </div>
-                                <div className="space-y-1">
-                                    {financialStructure.balanco.ativoCirculante.slice(0, 15).map((a, i) => (
-                                        <div key={i} className="flex justify-between items-start gap-2 py-1 border-b border-slate-50 dark:border-slate-700/50 last:border-0">
-                                            <div className="flex-1 min-w-0">
-                                                {renderAccountName(a)}
-                                            </div>
-                                            <span className="font-mono text-xs whitespace-nowrap">{formatCurrency(a.final_balance)}</span>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                            <div>
-                                <div className="flex justify-between font-bold text-slate-700 dark:text-slate-300 border-b dark:border-slate-600 pb-2 mb-2">
-                                    <span>Não Circulante</span>
-                                    <span>{formatCurrency(financialStructure.bpTotals.anc)}</span>
-                                </div>
-                                <div className="space-y-1">
-                                    {financialStructure.balanco.ativoNaoCirculante.slice(0, 15).map((a, i) => (
-                                        <div key={i} className="flex justify-between items-start gap-2 py-1 border-b border-slate-50 dark:border-slate-700/50 last:border-0">
-                                            <div className="flex-1 min-w-0">
-                                                {renderAccountName(a)}
-                                            </div>
-                                            <span className="font-mono text-xs whitespace-nowrap">{formatCurrency(a.final_balance)}</span>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    {/* PASSIVO */}
-                    <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-sm border border-slate-200 dark:border-slate-700 overflow-hidden">
-                        <div className="bg-red-600 p-4 text-white font-bold flex justify-between">
-                            <span>PASSIVO + PL</span>
-                            <span>{formatCurrency(financialStructure.bpTotals.pc + financialStructure.bpTotals.pnc + financialStructure.bpTotals.pl)}</span>
-                        </div>
-                        <div className="p-4 space-y-4">
-                            <div>
-                                <div className="flex justify-between font-bold text-slate-700 dark:text-slate-300 border-b dark:border-slate-600 pb-2 mb-2">
-                                    <span>Circulante</span>
-                                    <span>{formatCurrency(financialStructure.bpTotals.pc)}</span>
-                                </div>
-                                <div className="space-y-1">
-                                    {financialStructure.balanco.passivoCirculante.slice(0, 15).map((a, i) => (
-                                        <div key={i} className="flex justify-between items-start gap-2 py-1 border-b border-slate-50 dark:border-slate-700/50 last:border-0">
-                                            <div className="flex-1 min-w-0">
-                                                {renderAccountName(a)}
-                                            </div>
-                                            <span className="font-mono text-xs whitespace-nowrap">{formatCurrency(a.final_balance)}</span>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                            <div>
-                                <div className="flex justify-between font-bold text-slate-700 dark:text-slate-300 border-b dark:border-slate-600 pb-2 mb-2">
-                                    <span>Não Circulante</span>
-                                    <span>{formatCurrency(financialStructure.bpTotals.pnc)}</span>
-                                </div>
-                                <div className="space-y-1">
-                                    {financialStructure.balanco.passivoNaoCirculante.slice(0, 15).map((a, i) => (
-                                        <div key={i} className="flex justify-between items-start gap-2 py-1 border-b border-slate-50 dark:border-slate-700/50 last:border-0">
-                                            <div className="flex-1 min-w-0">
-                                                {renderAccountName(a)}
-                                            </div>
-                                            <span className="font-mono text-xs whitespace-nowrap">{formatCurrency(a.final_balance)}</span>
-                                        </div>
-                                    ))}
-                                </div>
-                            </div>
-                            <div>
-                                <div className="flex justify-between font-bold text-emerald-600 border-b dark:border-slate-600 pb-2 mb-2">
-                                    <span>Patrimônio Líquido</span>
-                                    <span>{formatCurrency(financialStructure.bpTotals.pl)}</span>
-                                </div>
-                                <div className="space-y-1">
-                                    {financialStructure.balanco.patrimonioLiquido.map((a, i) => (
-                                        <div key={i} className="flex justify-between items-start gap-2 py-1 border-b border-slate-50 dark:border-slate-700/50 last:border-0">
-                                            <div className="flex-1 min-w-0">
-                                                {renderAccountName(a)}
-                                            </div>
-                                            <span className="font-mono text-xs whitespace-nowrap">{formatCurrency(a.final_balance)}</span>
-                                        </div>
-                                    ))}
-                                    {financialStructure.balanco.patrimonioLiquido.length === 0 && (
-                                        <div className="flex justify-between text-xs text-slate-400 italic">
-                                            <span>Resultado do Período (Implícito)</span>
-                                            <span>{formatCurrency(financialStructure.bpTotals.pl)}</span>
-                                        </div>
-                                    )}
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            )}
-
-            {/* === LIST VIEW (Original) === */}
-            {viewTab === 'list' && (
-                <div className="bg-white dark:bg-slate-800 rounded-3xl shadow-xl border border-slate-200 dark:border-slate-700 overflow-hidden animate-fadeIn">
-                    <div className="px-6 py-4 border-b dark:border-slate-700 flex justify-between items-center bg-slate-50 dark:bg-slate-900/50">
-                        <h3 className="font-bold text-slate-700 dark:text-slate-300">Lista Completa de Contas</h3>
-                        <input
-                            type="text"
-                            placeholder="Filtrar..."
-                            value={searchTerm}
-                            onChange={e => setSearchTerm(e.target.value)}
-                            className="p-2 text-xs rounded border dark:bg-slate-700 dark:text-white"
-                        />
-                    </div>
-                    <div className="overflow-auto max-h-[600px]">
-                        <table className="w-full text-left text-sm">
-                            <thead className="bg-slate-100 dark:bg-slate-900 sticky top-0 z-10">
-                                <tr>
-                                    <th className="p-3">Código</th>
-                                    <th className="p-3">Conta</th>
-                                    <th className="p-3 text-right">Saldo</th>
-                                </tr>
-                            </thead>
-                            <tbody className="divide-y dark:divide-slate-700">
-                                {filteredAccounts.map((account, idx) => (
-                                    <tr key={idx} className={`hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors ${account.possible_inversion ? 'bg-amber-50/50' : ''}`}>
-                                        <td className="p-3 text-xs font-mono text-slate-500 border-r dark:border-slate-700">{account.account_code}</td>
-                                        <td className="px-4 py-2">
-                                            {renderAccountName(account)}
-                                        </td>
-                                        <td className={`p-3 text-right font-mono font-bold ${account.final_balance < 0 ? 'text-red-500' : 'text-slate-700 dark:text-slate-300'}`}>
-                                            {formatCurrency(account.final_balance)}
-                                        </td>
-                                    </tr>
-                                ))}
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            )}
-
-            <div className="bg-slate-900 py-3 px-8 text-right border-t border-slate-800 rounded-b-lg">
-                <span className="text-[9px] font-bold text-slate-500 uppercase tracking-[0.2em]">desenvolvido by - SP Assessoria Contabil.</span>
-            </div>
-        </div>
-    );
+export const analyzeDocument = async (fileBase64: string, mimeType: string): Promise<AnalysisResult> => {
+    if (!process.env.API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const sanitizedInput = sanitizeBase64(fileBase64);
+    const { lines, docType } = await extractRawData(ai, sanitizedInput, mimeType);
+    if (lines.length === 0) throw new Error("Nenhum dado contábil identificado.");
+    const result = normalizeFinancialData(lines, docType);
+    if (result.accounts.length === 0) throw new Error("Falha na interpretação das linhas. Tente outro formato.");
+    const sample = result.accounts.slice(0, 150).map(a => ({ code: a.account_code || '', name: a.account_name }));
+    const narrative = await generateNarrativeAnalysis(ai, result.summary, sample);
+    result.summary.period = narrative.period || 'Período não identificado';
+    result.summary.observations = narrative.observations || [];
+    result.spell_check = narrative.spellcheck || [];
+    if (narrative.account_audits) {
+        narrative.account_audits.forEach((audit: any) => {
+            const acc = result.accounts.find(a =>
+                (audit.code && a.account_code === audit.code) ||
+                (a.account_name.toLowerCase().includes(audit.name?.toLowerCase() || ''))
+            );
+            if (acc) {
+                acc.name_suggestion = audit.name_suggestion;
+                acc.posting_suggestion = audit.posting_suggestion;
+                acc.audit_notes = audit.audit_notes;
+            }
+        });
+    }
+    return result;
 };
 
-export default AnalysisViewer;
+export const generateFinancialInsight = async (analysisData: AnalysisResult, userPrompt: string, multiple: number): Promise<string> => {
+    if (!process.env.API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const accounts = (analysisData.accounts || [])
+        .filter(a => !a.is_synthetic)
+        .sort((a, b) => Math.abs(b.final_balance) - Math.abs(a.final_balance))
+        .slice(0, 200)
+        .map(a => `${a.account_code || ''} ${a.account_name}: ${a.final_balance}`)
+        .join('\n');
+    const prompt = `
+    DADOS DO RELATÓRIO:\n${accounts}
+    PEDIDO ESPECÍFICO:\n${userPrompt}
+    INSTRUÇÕES DE AUDITORIA:
+    1. Analise a LIQUIDEZ, SOLVÊNCIA e ESTRUTURA DE CAPITAL.
+    2. Comente sobre o Resultado do Período (Lucro/Prejuízo) em relação ao faturamento.
+    3. Destaque pontos de atenção na Saúde Financeira.
+    4. Seja técnico, direto e use o tom da SP Assessoria Contábil.
+    `;
+    const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+        model: 'gemini-2.0-flash',
+        contents: { parts: [{ text: prompt }] },
+        config: { systemInstruction: "Você é o Diretor de Auditoria e Estratégia da SP Assessoria.", temperature: 0.3 }
+    }));
+    return response.text || "Análise de saúde financeira não disponível no momento.";
+};
+
+export const generateCMVAnalysis = async (analysisData: AnalysisResult, accountingStandard: string): Promise<string> => {
+    if (!process.env.API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const accounts = (analysisData.accounts || []).slice(0, 300).map(a => `${a.account_code} ${a.account_name}: ${a.total_value}`).join('\n');
+    const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+        model: 'gemini-2.0-flash',
+        contents: { parts: [{ text: `Analise CMV:\n${accounts}` }] },
+        config: { systemInstruction: `Auditor de Custos SP Assessoria.`, temperature: 0.3 }
+    }));
+    return response.text || "Sem resposta.";
+};
+
+export const generateSpedComplianceCheck = async (analysisData: AnalysisResult): Promise<string> => {
+    if (!process.env.API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const accounts = (analysisData.accounts || []).slice(0, 250).map(a => `${a.account_code || '?'} | ${a.account_name} | ${a.final_balance}`).join('\n');
+    const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+        model: 'gemini-2.0-flash',
+        contents: { parts: [{ text: `Auditoria SPED:\n\n${accounts}` }] },
+        config: { systemInstruction: "Especialista em SPED ECD/ECF SP Assessoria.", temperature: 0.2 }
+    }));
+    return response.text || "Análise não gerada.";
+};
+
+export const chatWithFinancialAgent = async (history: { role: 'user' | 'model', parts: { text: string }[] }[], message: string) => {
+    if (!process.env.API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const chat: Chat = ai.chats.create({
+        model: 'gemini-2.0-flash',
+        history,
+        config: { systemInstruction: "Assistente contábil sênior SP Assessoria.", tools: [{ googleSearch: {} }] }
+    });
+    const result: GenerateContentResponse = await chat.sendMessage({ message });
+    return result.text;
+};
+
+export const generateComparisonAnalysis = async (rows: ComparisonRow[], period1: string, period2: string): Promise<string> => {
+    if (!process.env.API_KEY) throw new Error("API Key not found.");
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const topVariations = rows
+        .filter(r => !r.is_synthetic)
+        .sort((a, b) => Math.abs(b.varAbs) - Math.abs(a.varAbs))
+        .slice(0, 100)
+        .map(r => `${r.code} ${r.name}: De ${r.val1} para ${r.val2} (Var Abs: ${r.varAbs}, Var Pct: ${r.varPct.toFixed(2)}%)`)
+        .join('\n');
+    const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
+        model: 'gemini-2.0-flash',
+        contents: { parts: [{ text: `Analise as variações financeiras entre ${period1} e ${period2}:\n\n${topVariations}` }] },
+        config: { systemInstruction: "Auditor Contábil Senior da SP Assessoria especializado em análise horizontal.", temperature: 0.3 }
+    }));
+    return response.text || "Análise não gerada.";
+};
