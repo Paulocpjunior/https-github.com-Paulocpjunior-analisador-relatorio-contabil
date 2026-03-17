@@ -1,4 +1,3 @@
-
 import { GoogleGenAI, GenerateContentResponse, HarmCategory, HarmBlockThreshold, Chat } from "@google/genai";
 import { AnalysisResult, ExtractedAccount, ComparisonRow } from "../types";
 
@@ -43,7 +42,8 @@ function sanitizeBase64(base64: string): string {
 
     // 2. Remove all whitespace, newlines, and characters NOT in the base64 alphabet
     // Safari's atob() is extremely strict. It throws on ANY non-base64 character.
-    const cleaned = raw.replace(/[^A-Za-z0-9+/=]/g, '');
+    // FIX: escapado \/ para evitar SyntaxError no Safari (Unexpected token ')')
+    const cleaned = raw.replace(/[^A-Za-z0-9+\/=]/g, '');
 
     // 3. Ensure correct padding (length must be multiple of 4)
     // Valid base64 strings can only have 0, 1, or 2 '=' signs.
@@ -62,7 +62,8 @@ function sanitizeBase64(base64: string): string {
 
 function customBase64ToUint8Array(base64: string): Uint8Array {
     const raw = base64.includes(',') ? base64.split(',')[1] : base64;
-    const cleaned = raw.replace(/[^A-Za-z0-9+/]/g, '');
+    // FIX: escapado \/ para evitar SyntaxError no Safari (Unexpected token ')')
+    const cleaned = raw.replace(/[^A-Za-z0-9+\/]/g, '');
     const len = cleaned.length;
     let bufferLength = Math.floor((len * 3) / 4);
     if (cleaned[len - 1] === '=') bufferLength--;
