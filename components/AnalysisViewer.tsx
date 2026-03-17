@@ -70,24 +70,33 @@ const AnalysisViewer: React.FC<Props> = ({ result, headerData, previousAccounts,
 
         // --- DRE (INCOME STATEMENT) ---
         const dre = {
-            // FIX: Receita Bruta zerada no balancete
-            // PROBLEMA: contas analíticas do balancete têm código interno "0002" (não "3.1.x"),
-            // então `code.startsWith('3.1')` = false E type = 'Debit' → filtro excluía todas as receitas.
-            // SOLUÇÃO: buscar em TODAS as contas (incluindo sintéticas) por código 3.x,
-            // e usar a conta de menor nível não-sintética com final_balance > 0.
-            // Para contas sem código contábil, manter o match por nome + type Credit.
+            // FIX: Receita Bruta zerada no balancete analítico
+            // RAIZ: conta analítica tem código "0002" (interno do sistema), não "3.1.x".
+            // A conta com o valor correto é a sintética "3.1.1 - RECEITA BRUTA" (is_synthetic=true),
+            // mas activeData filtra .filter(!is_synthetic) → nunca encontrava o valor → R$ 0,00.
+            // SOLUÇÃO: busca em 3 camadas de fallback sem depender de type === 'Credit':
             receitaBruta: (() => {
-                // 1ª tentativa: contas com código iniciando em 3.1 (qualquer nível)
-                const byCode = accounts.filter(a =>
-                    !a.is_synthetic &&
+                // Camada 1: conta sintética com código 3.1.x (ex: "3.1.1 - RECEITA BRUTA")
+                const synth31 = accounts.filter(a =>
+                    a.is_synthetic &&
                     a.account_code &&
-                    (a.account_code.startsWith('3.1') || a.account_code.startsWith('3')) &&
+                    a.account_code.startsWith('3.1') &&
                     Math.abs(a.final_balance) > 0
                 );
-                if (byCode.length > 0) return byCode;
-                // 2ª tentativa: match por nome (sem exigir type Credit — type pode estar errado no balancete)
-                return accounts.filter(a =>
-                    !a.is_synthetic &&
+                if (synth31.length > 0) {
+                    // Pega a de menor nível hierárquico (mais abrangente)
+                    const top = synth31.reduce((prev, cur) =>
+                        (prev.account_code?.split('.').length || 0) <= (cur.account_code?.split('.').length || 0) ? prev : cur
+                    );
+                    return [top];
+                }
+                // Camada 2: analíticas com código começando em 3
+                const byCode3 = activeData.filter(a =>
+                    a.account_code?.startsWith('3') && Math.abs(a.final_balance) > 0
+                );
+                if (byCode3.length > 0) return byCode3;
+                // Camada 3: fallback por nome (sem exigir type Credit)
+                return activeData.filter(a =>
                     match(a, [], ['receita bruta', 'venda de', 'venda a', 'faturamento', 'serviços prestados']) &&
                     Math.abs(a.final_balance) > 0
                 );
