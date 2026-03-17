@@ -9,7 +9,6 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, baseDelay 
         const message = error?.message || '';
         const status = error?.status || error?.code;
 
-        // Do NOT retry on client errors: invalid API key, bad request, not found, auth errors
         const isClientError =
             status === 400 || status === 401 || status === 403 || status === 404 ||
             message.includes('400') || message.includes('401') || message.includes('403') ||
@@ -31,23 +30,19 @@ async function retryWithBackoff<T>(fn: () => Promise<T>, retries = 3, baseDelay 
 
 /**
  * Sanitizes a base64 string for safe use with Safari's atob() and Gemini SDK.
- * Safari's atob() implementation is extremely strict and throws "The string did not match the expected pattern"
- * if it encounters whitespace, newlines, or invalid characters.
+ * Safari's atob() throws "The string did not match the expected pattern"
+ * on any non-base64 character.
  */
 function sanitizeBase64(base64: string): string {
     if (!base64) return "";
 
-    // 1. Remove data URL prefix if present (e.g., "data:application/pdf;base64,")
     const raw = base64.includes(',') ? base64.split(',')[1] : base64;
 
-    // 2. Remove all whitespace, newlines, and characters NOT in the base64 alphabet
-    // Safari's atob() is extremely strict. It throws on ANY non-base64 character.
-    // FIX: escapado \/ para evitar SyntaxError no Safari (Unexpected token ')')
+    // FIX #1: \/ escapado — evita SyntaxError "Unexpected token ')'" no Safari
+    // ANTES (bug): /[^A-Za-z0-9+/=]/g
+    // DEPOIS (fix): /[^A-Za-z0-9+\/=]/g
     const cleaned = raw.replace(/[^A-Za-z0-9+\/=]/g, '');
 
-    // 3. Ensure correct padding (length must be multiple of 4)
-    // Valid base64 strings can only have 0, 1, or 2 '=' signs.
-    // If length % 4 == 1, adding '===' is invalid. We fallback to 0 padding or truncation if needed.
     const contentWithoutPadding = cleaned.replace(/=/g, '');
     const remainder = contentWithoutPadding.length % 4;
 
@@ -55,14 +50,15 @@ function sanitizeBase64(base64: string): string {
     if (remainder === 2) return contentWithoutPadding + '==';
     if (remainder === 3) return contentWithoutPadding + '=';
 
-    // remainder === 1 is invalid/corrupt data. Safari will fail anyway if we add ===.
-    // We return it as is or try to "fix" it by removing the dangling char.
     return contentWithoutPadding.substring(0, contentWithoutPadding.length - 1);
 }
 
 function customBase64ToUint8Array(base64: string): Uint8Array {
     const raw = base64.includes(',') ? base64.split(',')[1] : base64;
-    // FIX: escapado \/ para evitar SyntaxError no Safari (Unexpected token ')')
+
+    // FIX #2: \/ escapado — mesma correção do Safari
+    // ANTES (bug): /[^A-Za-z0-9+/]/g
+    // DEPOIS (fix): /[^A-Za-z0-9+\/]/g
     const cleaned = raw.replace(/[^A-Za-z0-9+\/]/g, '');
     const len = cleaned.length;
     let bufferLength = Math.floor((len * 3) / 4);
@@ -103,36 +99,27 @@ function parseFinancialNumber(val: any): number {
 
     let clean = String(val).trim();
 
-    // Quick return for empty or non-numeric looking strings
     if (!clean || clean === '-' || clean === '–') return 0;
 
-    // Remove currency symbols and common noise
     clean = clean.replace(/^R\$\s?/, '').replace(/\s/g, '');
 
-    // Fix common OCR errors
     clean = clean.replace(/O/gi, '0')
         .replace(/l/g, '1')
         .replace(/[^0-9.,\-()]/g, '');
 
-    // Handle Parentheses as Negative
     const isNegativeParens = /^\(.*\)$/.test(clean);
     if (isNegativeParens) {
         clean = clean.replace(/[()]/g, '');
     }
 
-    // IMPORTANT: Brazilian Format Detection (1.000,00) vs US (1,000.00)
     const lastDotIndex = clean.lastIndexOf('.');
     const lastCommaIndex = clean.lastIndexOf(',');
 
     if (lastCommaIndex > lastDotIndex) {
-        // Brazilian format: remove dots, replace comma with dot
         clean = clean.replace(/\./g, '').replace(',', '.');
     } else if (lastDotIndex > lastCommaIndex) {
-        // US format: remove commas
         clean = clean.replace(/,/g, '');
     } else {
-        // No separator or only one type. 
-        // If it has a comma, treat as decimal separator (common in BR)
         if (clean.includes(',')) clean = clean.replace(',', '.');
     }
 
@@ -148,24 +135,18 @@ function checkInversion(name: string, type: 'Debit' | 'Credit', finalBalance: nu
     const lowerName = name.toLowerCase();
     let expectedNature: 'Debit' | 'Credit' | 'Unknown' = 'Unknown';
 
-    // Standard Accounting Logic (Brazil/IFRS)
-    if (code.startsWith('1')) expectedNature = 'Debit'; // Ativo
-    else if (code.startsWith('2')) expectedNature = 'Credit'; // Passivo / PL
+    if (code.startsWith('1')) expectedNature = 'Debit';
+    else if (code.startsWith('2')) expectedNature = 'Credit';
     else if (code.startsWith('3') || code.startsWith('4')) {
-        // Depends on chart of accounts, but usually 3 is Revenue and 4 is Expense
         if (lowerName.includes('receita') || lowerName.includes('faturamento') || lowerName.includes('venda')) expectedNature = 'Credit';
         else if (lowerName.includes('despesa') || lowerName.includes('custo') || lowerName.includes('gastos')) expectedNature = 'Debit';
     }
 
-    // Deductions usually have reversed nature
-    const deductionKeywords = [
-        'devolu', 'cancelamento', 'abatimento', 'imposto sobre', 'tributo sobre'
-    ];
+    const deductionKeywords = ['devolu', 'cancelamento', 'abatimento', 'imposto sobre', 'tributo sobre'];
     if (deductionKeywords.some(k => lowerName.includes(k))) {
         expectedNature = (expectedNature === 'Debit') ? 'Credit' : 'Debit';
     }
 
-    // Accummlated Depreciation / Amortization (Asset Deductions)
     if (lowerName.includes('depreciação acumulada') || lowerName.includes('amortização acumulada')) {
         expectedNature = 'Credit';
     }
@@ -175,12 +156,10 @@ function checkInversion(name: string, type: 'Debit' | 'Credit', finalBalance: nu
         if (indicator.toUpperCase() === 'D') actualNature = 'Debit';
         if (indicator.toUpperCase() === 'C') actualNature = 'Credit';
     } else {
-        // If no indicator, we assume positive (for the account type) or look at sign
         if (finalBalance < 0) actualNature = (type === 'Debit') ? 'Credit' : 'Debit';
     }
 
     if (expectedNature !== 'Unknown' && expectedNature !== actualNature) {
-        // Special Case: Profit/Loss can be either
         if (lowerName.includes('lucro') || lowerName.includes('prejuízo') || lowerName.includes('resultado')) return false;
         return true;
     }
@@ -192,21 +171,11 @@ function mapValuesToColumns(numbers: number[], docType: string): { initial: numb
     const count = numbers.length;
     let initial = 0, debit = 0, credit = 0, final = 0;
 
-    // --- DRE SPECIFIC LOGIC ---
     if (docType === 'DRE') {
-        if (count > 0) {
-            // For DRE, usually the last valid number is the accumulated or relevant period result in single-column extractions.
-            // However, our prompt asks to prioritize current period.
-            // Let's take the LAST number found if multiple exist, assuming column order [Period 1] [Period 2] ...
-            // Or if pipe extraction is clean, index 0 is what we want.
-            // Safe bet: The number with the highest absolute value is likely the Total.
-            // Actually, strict index 0 is safer if the prompt is obeyed.
-            final = numbers[0];
-        }
+        if (count > 0) final = numbers[0];
         return { initial, debit, credit, final };
     }
 
-    // --- STANDARD BALANCETE LOGIC ---
     if (count === 1) {
         final = numbers[0];
     } else if (count === 2) {
@@ -233,19 +202,16 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
         let cleanLine = line.trim();
         if (!cleanLine || cleanLine.length < 5) return;
 
-        // Filter out likely headers
         if (/^(doctype|data|conta|descri|saldo|débito|crédito|página|page|cod|cód|movimento|transporte|historico|empresa|cnpj)/i.test(cleanLine)) return;
-        // Filter markdown table separators
         if (/^\|?[\s-]+\|?$/.test(cleanLine)) return;
 
         let code = '';
         let name = '';
         let valuesPart: number[] = [];
-        let type: 'Debit' | 'Credit' = 'Debit'; // Default
+        let type: 'Debit' | 'Credit' = 'Debit';
 
-        // --- STRATEGY 1: PIPE SEPARATOR (Preferred) ---
+        // --- STRATEGY 1: PIPE SEPARATOR ---
         if (cleanLine.includes('|')) {
-            // Robust split: trim and remove empty parts (common in markdown "| val |" -> ["", "val", ""])
             const parts = cleanLine.split('|').map(p => p.trim()).filter(p => p.length > 0);
 
             if (parts.length >= 2) {
@@ -255,13 +221,11 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
                     code = parts[0];
                     name = parts[1];
                     for (let i = 2; i < parts.length; i++) {
-                        // Filter out known non-value columns like "D", "C", "%"
                         if (/^[DC%]$/i.test(parts[i])) continue;
                         const val = parseFinancialNumber(parts[i]);
                         valuesPart.push(val);
                     }
                 } else {
-                    // No Code, just Name | Value
                     name = parts[0];
                     for (let i = 1; i < parts.length; i++) {
                         if (/^[DC%]$/i.test(parts[i])) continue;
@@ -273,8 +237,7 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
 
         // --- STRATEGY 2: REVERSE PARSING (Fallback) ---
         if (valuesPart.length === 0) {
-            // Clean common separator noise
-            cleanLine = cleanLine.replace(/\.{3,}/g, ' '); // Replace .... with space
+            cleanLine = cleanLine.replace(/\.{3,}/g, ' ');
 
             const tokens = cleanLine.split(/\s+/);
             const foundNumbers: number[] = [];
@@ -284,20 +247,17 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
             while (lastTokenIndex >= 0 && numbersFoundCount < 4) {
                 const token = tokens[lastTokenIndex];
 
-                // Skip indicators
                 if (/^[DC%]$/i.test(token)) {
                     lastTokenIndex--;
                     continue;
                 }
 
-                // Check if it looks strictly like a financial number
                 if (/^[\d.,\-()]+$/.test(token) && /\d/.test(token)) {
                     const val = parseFinancialNumber(token);
                     foundNumbers.unshift(val);
                     numbersFoundCount++;
                     lastTokenIndex--;
                 } else {
-                    // If we hit a word, stop (unless it's R$)
                     if (token.toUpperCase() === 'R$') {
                         lastTokenIndex--;
                     } else {
@@ -320,22 +280,39 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
             }
         }
 
-        // Cleanup Name
         name = name.replace(/[.|]{2,}/g, '').trim();
         if (!name || name.length < 2 || valuesPart.length === 0) return;
 
-        // Determine Type (Debit/Credit) mainly for DRE logic
         const lowerName = name.toLowerCase();
 
+        // FIX #3: Detecção de tipo Credit corrigida para Receita Bruta
+        // PROBLEMA: AnalysisViewer filtra receita com `&& a.type === 'Credit'`
+        // ANTES (bug): lowerName.includes('vendas')
+        //   → "VENDA DE MERCADORIAS A PRAZO" não contém "vendas" → type = 'Debit' → Receita Bruta = R$ 0,00
+        // DEPOIS (fix): lowerName.includes('venda') cobre 'venda de ...', 'vendas', 'venda a prazo', etc.
         if (code.startsWith('2') || code.startsWith('3') || code.startsWith('6') ||
-            lowerName.includes('passivo') || lowerName.includes('fornecedor') ||
-            lowerName.includes('receita') || lowerName.includes('patrimônio') || lowerName.includes('capital') ||
-            lowerName.includes('lucro') || lowerName.includes('vendas')) {
+            lowerName.includes('passivo') ||
+            lowerName.includes('fornecedor') ||
+            lowerName.includes('receita') ||
+            lowerName.includes('patrimônio') ||
+            lowerName.includes('capital') ||
+            lowerName.includes('lucro') ||
+            lowerName.includes('venda') ||            // FIX: era 'vendas', agora cobre 'venda de mercadorias', etc.
+            lowerName.includes('faturamento') ||      // FIX: adicionado
+            lowerName.includes('serviços prestados')  // FIX: adicionado
+        ) {
             type = 'Credit';
         }
 
+        // Exceção: devoluções e cancelamentos são sempre Debit, mesmo com 'venda' no nome
+        if (lowerName.includes('devoluc') || lowerName.includes('devolução') ||
+            lowerName.includes('cancelamento') || lowerName.includes('abatimento')) {
+            type = 'Debit';
+        }
+
         if (docType === 'DRE') {
-            if (lowerName.includes('custo') || lowerName.includes('despesa') || lowerName.includes('imposto') || lowerName.includes('cmv')) {
+            if (lowerName.includes('custo') || lowerName.includes('despesa') ||
+                lowerName.includes('imposto') || lowerName.includes('cmv')) {
                 type = 'Debit';
             }
         }
@@ -402,13 +379,17 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
                 if (charAfter === '.' || charAfter === '-' || charAfter === undefined) isParent = true;
             }
             acc.is_synthetic = isParent;
-        } else if (acc.account_name.toLowerCase().startsWith('total') || acc.account_name.toLowerCase().startsWith('grupo') || acc.account_name.toLowerCase().startsWith('resultado')) {
+        } else if (acc.account_name.toLowerCase().startsWith('total') ||
+                   acc.account_name.toLowerCase().startsWith('grupo') ||
+                   acc.account_name.toLowerCase().startsWith('resultado')) {
             acc.is_synthetic = true;
         }
     });
 
     const analyticalAccounts = accounts.filter(a => !a.is_synthetic);
-    const calcAccounts = analyticalAccounts.length > 0 ? analyticalAccounts : accounts.filter(a => !a.account_name.toLowerCase().includes('total'));
+    const calcAccounts = analyticalAccounts.length > 0
+        ? analyticalAccounts
+        : accounts.filter(a => !a.account_name.toLowerCase().includes('total'));
 
     const total_debits = calcAccounts.reduce((sum, a) => sum + Math.abs(a.debit_value), 0);
     const total_credits = calcAccounts.reduce((sum, a) => sum + Math.abs(a.credit_value), 0);
@@ -433,14 +414,20 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
                 }
             } else {
                 const lower = acc.account_name.toLowerCase();
-                if ((lower.includes('receita') || lower.includes('faturamento')) && acc.type === 'Credit') { revenueSum += Math.abs(acc.final_balance); }
-                if ((lower.includes('despesa') || lower.includes('custo')) && acc.type === 'Debit') { expenseSum += Math.abs(acc.final_balance); }
+                if ((lower.includes('receita') || lower.includes('faturamento') || lower.includes('venda')) && acc.type === 'Credit') {
+                    revenueSum += Math.abs(acc.final_balance);
+                }
+                if ((lower.includes('despesa') || lower.includes('custo')) && acc.type === 'Debit') {
+                    expenseSum += Math.abs(acc.final_balance);
+                }
             }
         });
         calculatedResult = revenueSum - expenseSum;
 
         if (Math.abs(calculatedResult) < 0.01) {
-            const resultAccount = analyticalAccounts.find(a => /lucro\s+l[ií]quido|preju[ií]zo\s+l[ií]quido/i.test(a.account_name));
+            const resultAccount = analyticalAccounts.find(a =>
+                /lucro\s+l[ií]quido|preju[ií]zo\s+l[ií]quido/i.test(a.account_name)
+            );
             if (resultAccount) {
                 calculatedResult = resultAccount.final_balance;
                 resultLabel = resultAccount.account_name;
@@ -465,7 +452,7 @@ function normalizeFinancialData(rawLines: string[], docType: string): AnalysisRe
     };
 }
 
-// --- NEW PDF CHUNKING LOGIC ---
+// --- PDF EXTRACTION ---
 async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: string): Promise<{ lines: string[], docType: string }> {
     const safetySettings = [
         { category: HarmCategory.HARM_CATEGORY_HATE_SPEECH, threshold: HarmBlockThreshold.BLOCK_NONE },
@@ -498,12 +485,13 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
         let docType = 'Balancete';
 
         if (mimeType === 'text/csv' || mimeType === 'text/plain' || mimeType === 'application/csv') {
-            // ... (CSV logic remains the same) ...
             const decodedText = safeDecodeBase64(fileBase64);
             const allLines = decodedText.split('\n');
             const CHUNK_SIZE = 600;
             const chunks: string[] = [];
-            for (let i = 0; i < allLines.length; i += CHUNK_SIZE) chunks.push(allLines.slice(i, i + CHUNK_SIZE).join('\n'));
+            for (let i = 0; i < allLines.length; i += CHUNK_SIZE) {
+                chunks.push(allLines.slice(i, i + CHUNK_SIZE).join('\n'));
+            }
 
             for (let i = 0; i < chunks.length; i++) {
                 const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
@@ -515,9 +503,6 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
             }
         }
         else if (mimeType === 'application/pdf') {
-            // === DIRECT GEMINI PDF PROCESSING ===
-            // Gemini's vision model natively handles multi-page PDFs.
-            // This approach is more robust than pdf-lib chunking.
             console.log("Sending PDF directly to Gemini for extraction...");
             const sanitizedPdf = sanitizeBase64(fileBase64);
             const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
@@ -531,9 +516,7 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
                 config: { temperature: 0.0, maxOutputTokens: 65000, safetySettings }
             }));
             if (response.text) extractedText = response.text;
-
         } else {
-            // Excel/Image Fallback (No chunking for Images usually needed)
             const sanitizedData = sanitizeBase64(fileBase64);
             const response = await retryWithBackoff<GenerateContentResponse>(() => ai.models.generateContent({
                 model: 'gemini-2.0-flash',
@@ -550,14 +533,12 @@ async function extractRawData(ai: GoogleGenAI, fileBase64: string, mimeType: str
 
         let lines = extractedText.split('\n').filter(l => l.trim().length > 0);
 
-        // Detect DocType from Text
         const docTypeLine = lines.find(l => /Balanço|Balancete|Demonstração|Resultado/i.test(l));
         if (docTypeLine) {
             if (/Resultado|DRE/i.test(docTypeLine)) docType = 'DRE';
             else if (/Balanço/i.test(docTypeLine)) docType = 'Balanço Patrimonial';
         }
 
-        // Remove known garbage lines
         lines = lines.filter(l => !l.startsWith('DOCTYPE') && /\d/.test(l));
 
         return { lines, docType };
@@ -613,7 +594,9 @@ async function generateNarrativeAnalysis(ai: GoogleGenAI, summaryData: any, samp
             spellcheck: parsed.spellcheck || [],
             account_audits: parsed.account_audits || []
         };
-    } catch (e) { return { observations: [], spellcheck: [], period: "Indefinido", account_audits: [] }; }
+    } catch (e) {
+        return { observations: [], spellcheck: [], period: "Indefinido", account_audits: [] };
+    }
 }
 
 export const analyzeDocument = async (fileBase64: string, mimeType: string): Promise<AnalysisResult> => {
@@ -622,7 +605,6 @@ export const analyzeDocument = async (fileBase64: string, mimeType: string): Pro
     const sanitizedInput = sanitizeBase64(fileBase64);
     const { lines, docType } = await extractRawData(ai, sanitizedInput, mimeType);
 
-    // Debug Log to see what Gemini is actually returning in Console
     console.log("Raw Extracted Lines Preview:", lines.slice(0, 10));
 
     if (lines.length === 0) throw new Error("Nenhum dado contábil identificado.");
@@ -630,7 +612,6 @@ export const analyzeDocument = async (fileBase64: string, mimeType: string): Pro
 
     if (result.accounts.length === 0) throw new Error("Falha na interpretação das linhas. Tente outro formato.");
 
-    // Sample formatting for AI Audit
     const sample = result.accounts.slice(0, 150).map(a => ({
         code: a.account_code || '',
         name: a.account_name
@@ -641,7 +622,6 @@ export const analyzeDocument = async (fileBase64: string, mimeType: string): Pro
     result.summary.observations = narrative.observations || [];
     result.spell_check = narrative.spellcheck || [];
 
-    // Map audit suggestions back to accounts
     if (narrative.account_audits) {
         narrative.account_audits.forEach((audit: any) => {
             const acc = result.accounts.find(a =>
@@ -663,7 +643,6 @@ export const generateFinancialInsight = async (analysisData: AnalysisResult, use
     if (!process.env.API_KEY) throw new Error("API Key not found.");
     const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-    // Pegar amostra maior e mais estruturada para a Saúde Financeira
     const accounts = (analysisData.accounts || [])
         .filter(a => !a.is_synthetic)
         .sort((a, b) => Math.abs(b.final_balance) - Math.abs(a.final_balance))
@@ -730,7 +709,7 @@ export const chatWithFinancialAgent = async (history: { role: 'user' | 'model', 
     });
     const result: GenerateContentResponse = await chat.sendMessage({ message });
     return result.text;
-}
+};
 
 export const generateComparisonAnalysis = async (rows: ComparisonRow[], period1: string, period2: string): Promise<string> => {
     if (!process.env.API_KEY) throw new Error("API Key not found.");
