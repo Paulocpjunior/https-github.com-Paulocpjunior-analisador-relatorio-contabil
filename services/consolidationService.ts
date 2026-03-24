@@ -1,14 +1,29 @@
-
 import { AnalysisResult, HistoryItem, ConsolidationResult, ConsolidatedRow, ConsolidatedCompany } from "../types";
 
-// Helper to normalize account keys for merging
+// FIX 1: getAccountKey — preserva estrutura do código, apenas normaliza separadores.
+// ANTES: code.replace(/[^0-9]/g, '') → "0000000001" virava "1", colidindo com a conta "1" (ATIVO).
+// DEPOIS: mantém pontos e zeros, apenas remove espaços e padroniza maiúsculas.
 const getAccountKey = (code: string | null, name: string): string => {
-    // Priority: Code. If code exists, use it as primary key (stripping dots for loose matching).
-    // If no code, use normalized name.
-    if (code && code.length > 0) {
-        return code.replace(/[^0-9]/g, ''); 
+    if (code && code.trim().length > 0) {
+        return code.trim().toUpperCase();
     }
     return name.trim().toUpperCase();
+};
+
+// FIX 3: Corrige sinal do final_balance para Balanço Patrimonial.
+// Contas de Ativo (código inicia com "1") têm natureza DEVEDORA → saldo sempre positivo.
+// Contas de Passivo/PL (código inicia com "2") têm natureza CREDORA → saldo sempre positivo tb
+// (representadas como positivo na visão de consolidação).
+const normalizeBalance = (finalBalance: number, accountCode: string | null): number => {
+    if (!accountCode) return finalBalance;
+    const firstChar = accountCode.trim().replace(/^0+/, '').charAt(0);
+    if (firstChar === '1' && finalBalance < 0) {
+        return Math.abs(finalBalance); // Ativo com sinal negativo → inverte
+    }
+    if (firstChar === '2' && finalBalance < 0) {
+        return Math.abs(finalBalance); // Passivo/PL com sinal negativo → inverte
+    }
+    return finalBalance;
 };
 
 export const consolidateDREs = (items: { item: HistoryItem, result: AnalysisResult }[]): ConsolidationResult => {
@@ -20,60 +35,105 @@ export const consolidateDREs = (items: { item: HistoryItem, result: AnalysisResu
 
     const accountMap = new Map<string, ConsolidatedRow>();
 
-    // 1. Iterate over all companies to build the superset of accounts
-    items.forEach(({ item, result }) => {
-        result.accounts.forEach(acc => {
-            const key = getAccountKey(acc.account_code, acc.account_name);
-            
-            if (!accountMap.has(key)) {
-                accountMap.set(key, {
-                    code: acc.account_code || '',
-                    name: acc.account_name,
-                    is_synthetic: acc.is_synthetic,
-                    level: acc.level,
-                    values: {},
-                    total: 0
-                });
-            }
+    // FIX 2: Ignora contas sintéticas na mesclagem inicial.
+    // ANTES: processava TUDO, inclusive sintéticas — cada empresa tem sua própria conta
+    // "ATIVO CIRCULANTE" já somada. Ao mesclar, o mapa ficava com o valor de apenas
+    // uma empresa (a última a escrever), ignorando as demais.
+    // DEPOIS: apenas analíticas são mescladas. Sintéticas são recalculadas depois.
 
-            const row = accountMap.get(key)!;
-            
-            // Populate value for this company
-            // Ensure we initialize if undefined
-            if (row.values[item.id] === undefined) row.values[item.id] = 0;
-            
-            // Add value (Assuming final_balance represents the DRE line value)
-            // Note: In our extraction logic, final_balance for DRE is the line amount.
-            row.values[item.id] = acc.final_balance;
-        });
+    // 1. Mescla apenas contas analíticas de todas as empresas
+    items.forEach(({ item, result }) => {
+        result.accounts
+            .filter(acc => !acc.is_synthetic) // ← pula sintéticas
+            .forEach(acc => {
+                const key = getAccountKey(acc.account_code, acc.account_name);
+
+                if (!accountMap.has(key)) {
+                    accountMap.set(key, {
+                        code: acc.account_code || '',
+                        name: acc.account_name,
+                        is_synthetic: false,
+                        level: acc.level,
+                        values: {},
+                        total: 0
+                    });
+                }
+
+                const row = accountMap.get(key)!;
+
+                if (row.values[item.id] === undefined) row.values[item.id] = 0;
+
+                // FIX 3 aplicado: corrige sinal antes de armazenar
+                row.values[item.id] = normalizeBalance(acc.final_balance, acc.account_code);
+            });
     });
 
-    // 2. Calculate Totals and finalize rows
+    // 2. Recalcula contas sintéticas somando seus filhos analíticos do accountMap.
+    // Garante que ATIVO, ATIVO CIRCULANTE, DISPONÍVEL etc. reflitam a soma real
+    // das 4 empresas, e não apenas o valor de uma delas.
+    const syntheticMeta = new Map<string, { code: string; name: string; level: number }>();
+
+    items.forEach(({ result }) => {
+        result.accounts
+            .filter(acc => acc.is_synthetic)
+            .forEach(acc => {
+                const key = getAccountKey(acc.account_code, acc.account_name);
+                if (!syntheticMeta.has(key)) {
+                    syntheticMeta.set(key, {
+                        code: acc.account_code || '',
+                        name: acc.account_name,
+                        level: acc.level
+                    });
+                }
+            });
+    });
+
+    syntheticMeta.forEach((meta, synKey) => {
+        const synRow: ConsolidatedRow = {
+            code: meta.code,
+            name: meta.name,
+            is_synthetic: true,
+            level: meta.level,
+            values: {},
+            total: 0
+        };
+
+        // Inicializa todas as empresas com 0
+        companies.forEach(c => { synRow.values[c.id] = 0; });
+
+        // Soma todas as analíticas cujo código começa com o código da sintética + "."
+        if (meta.code) {
+            accountMap.forEach((anaRow) => {
+                if (anaRow.code && anaRow.code.startsWith(meta.code + '.')) {
+                    companies.forEach(c => {
+                        synRow.values[c.id] = (synRow.values[c.id] || 0) + (anaRow.values[c.id] || 0);
+                    });
+                }
+            });
+        }
+
+        accountMap.set(synKey, synRow);
+    });
+
+    // 3. Calcula TOTAL GRUPO para todas as linhas (analíticas + sintéticas recalculadas)
     const rows = Array.from(accountMap.values()).map(row => {
         let sum = 0;
         companies.forEach(company => {
             const val = row.values[company.id] || 0;
-            row.values[company.id] = val; // Ensure 0 instead of undefined
+            row.values[company.id] = val;
             sum += val;
         });
         row.total = sum;
         return row;
     });
 
-    // 3. Sort rows by Code
+    // 4. Ordena por código (natural sort: "1.1" < "1.1.1" < "1.1.2" < "1.2")
     rows.sort((a, b) => {
-        // Handle rows without codes (push to bottom or sort by name)
-        if (!a.code && !b.code) return 0;
+        if (!a.code && !b.code) return a.name.localeCompare(b.name);
         if (!a.code) return 1;
         if (!b.code) return -1;
-        
-        // Natural sort for "1.01", "1.02", "1.10"
         return a.code.localeCompare(b.code, undefined, { numeric: true, sensitivity: 'base' });
     });
-
-    // 4. Recalculate Result (Lucro/Prejuízo) explicitly to ensure math consistency
-    // (Optional, depends if the rows contain the calculated result or just lines)
-    // We rely on the rows extracted.
 
     return {
         companies,
